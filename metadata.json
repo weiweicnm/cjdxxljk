@@ -1,0 +1,5 @@
+{
+  "name": "Remix: 长大心理 - 校园心理健康平台",
+  "description": "温馨治愈的校园心理诊疗与预警平台，支持SCL-90数据分析与AI辅助咨询。",
+  "requestFramePermissions": ["camera"]
+}
