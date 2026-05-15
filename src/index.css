@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+.markdown-body {
+  @apply space-y-4;
+}
+
+.markdown-body p {
+  @apply leading-relaxed;
+}
+
+.markdown-body h1, .markdown-body h2, .markdown-body h3 {
+  @apply font-bold text-sky-900 mt-6 mb-4;
+}
+
+.markdown-body h1 { @apply text-2xl; }
+.markdown-body h2 { @apply text-xl; }
+.markdown-body h3 { @apply text-lg; }
+
+.markdown-body ul {
+  @apply list-disc list-inside space-y-2 ml-4;
+}
+
+.markdown-body ol {
+  @apply list-decimal list-inside space-y-2 ml-4;
+}
+
+.markdown-body strong {
+  @apply font-semibold text-sky-800;
+}
+
+.markdown-body blockquote {
+  @apply border-l-4 border-sky-300 pl-4 italic text-sky-700/80 bg-sky-50/50 py-2 rounded-r-lg;
+}
