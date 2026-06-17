@@ -197,7 +197,7 @@ export function EmotionRecognition() {
 
       // 2. 归一化 (模型要求: 除以 255.0)
       // 模型期望输入范围是 [0, 1]，不需要 ImageNet 均值/标准差
-      const normalizedValue = gray / 255.0;
+      const normalizedValue = gray;
 
       // 3. 填充数据
       // 因为是单通道，所以直接填入第一个通道
