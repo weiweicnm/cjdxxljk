@@ -13,9 +13,9 @@ export function EmotionRecognition() {
   
   // 模型与预处理配置
   const [labels, setLabels] = useState('愤怒,厌恶,恐惧,开心,悲伤,惊讶,中性');
-  const [inputSize, setInputSize] = useState('640');
-  const [channels, setChannels] = useState<'3' | '1'>('3');
-  const [normalization, setNormalization] = useState<'imagenet' | 'none'>('imagenet');
+  const [inputSize, setInputSize] = useState('64');
+  const [channels, setChannels] = useState<'3' | '1'>('1');
+  const [normalization, setNormalization] = useState<'imagenet' | 'none'>('none');
 
   // 工作模式选择
   const [mode, setMode] = useState<'image' | 'camera'>('image');
@@ -82,6 +82,42 @@ export function EmotionRecognition() {
     }
   };
 
+  // 自动拉取模型
+  useEffect(() => {
+    const loadDefaultModel = async () => {
+      try {
+        setModelStatus('loading');
+        // 确保 public/emotion-ferplus-12-int8.onnx 存在
+        const response = await fetch('/emotion-ferplus-12-int8.onnx');
+        
+        if (!response.ok) {
+          throw new Error(`模型文件未找到或网络错误: ${response.status}`);
+        }
+
+        const buffer = await response.arrayBuffer();
+        // 注意：如果模型较大，建议增加进度反馈
+        const session = await ort.InferenceSession.create(buffer, { 
+          executionProviders: ['wasm'] 
+        });
+        
+        setSession(session);
+        setModelStatus('ready');
+        setErrorMessage('');
+        console.log("✅ 默认模型自动加载成功");
+      } catch (err: any) {
+        console.error("❌ 自动加载模型失败:", err);
+        setModelStatus('error');
+        setErrorMessage(
+          '默认模型加载失败。请检查控制台错误，' +
+          '或手动上传模型文件 (emotion-ferplus-8.onnx)'
+        );
+      }
+    };
+
+    // 只在组件挂载时执行一次
+    loadDefaultModel();
+  }, []); // 依赖数组为空
+  // 手动选择模型
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -97,8 +133,8 @@ export function EmotionRecognition() {
   const performInference = async (source: CanvasImageSource): Promise<string> => {
     if (!session) throw new Error("模型未加载");
 
-    const targetSize = parseInt(inputSize) || 224;
-    const c = parseInt(channels) || 3;
+    const targetSize = 64;
+    const c = 1;
 
     const canvas = document.createElement('canvas');
     canvas.width = targetSize;
@@ -129,28 +165,43 @@ export function EmotionRecognition() {
     const float32Data = new Float32Array(1 * c * targetSize * targetSize);
 
     for (let i = 0; i < targetSize * targetSize; i++) {
-      const offset = i * 4;
-      let r = imgData[offset] / 255.0;
-      let g = imgData[offset + 1] / 255.0;
-      let b = imgData[offset + 2] / 255.0;
+      // const offset = i * 4;
+      // let r = imgData[offset] / 255.0;
+      // let g = imgData[offset + 1] / 255.0;
+      // let b = imgData[offset + 2] / 255.0;
 
-      if (c === 3) {
-        if (normalization === 'imagenet') {
-          r = (r - 0.485) / 0.229;
-          g = (g - 0.456) / 0.224;
-          b = (b - 0.406) / 0.225;
-        }
-        float32Data[i] = r;
-        float32Data[i + targetSize * targetSize] = g;
-        float32Data[i + 2 * targetSize * targetSize] = b;
-      } else {
-        // 单通道灰度
-        let gray = r * 0.299 + g * 0.587 + b * 0.114;
-        if (normalization === 'imagenet') {
-          gray = (gray - 0.5) / 0.5;
-        }
-        float32Data[i] = gray;
-      }
+      // if (c === 3) {
+      //   if (normalization === 'imagenet') {
+      //     r = (r - 0.485) / 0.229;
+      //     g = (g - 0.456) / 0.224;
+      //     b = (b - 0.406) / 0.225;
+      //   }
+      //   float32Data[i] = r;
+      //   float32Data[i + targetSize * targetSize] = g;
+      //   float32Data[i + 2 * targetSize * targetSize] = b;
+      // } else {
+      //   // 单通道灰度
+      //   let gray = r * 0.299 + g * 0.587 + b * 0.114;
+      //   if (normalization === 'imagenet') {
+      //     gray = (gray - 0.5) / 0.5;
+      //   }
+      //   float32Data[i] = gray;
+      // }
+      const offset = i * 4;
+      // 1. 转灰度 (模型要求)
+      // 使用加权平均法转换 RGB 为灰度
+      const r = imgData[offset];
+      const g = imgData[offset + 1];
+      const b = imgData[offset + 2];
+      let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+
+      // 2. 归一化 (模型要求: 除以 255.0)
+      // 模型期望输入范围是 [0, 1]，不需要 ImageNet 均值/标准差
+      const normalizedValue = gray / 255.0;
+
+      // 3. 填充数据
+      // 因为是单通道，所以直接填入第一个通道
+      float32Data[i] = normalizedValue;
     }
 
     const tensor = new ort.Tensor('float32', float32Data, [1, c, targetSize, targetSize]);
@@ -256,7 +307,7 @@ export function EmotionRecognition() {
     <div className="p-8 max-w-7xl mx-auto space-y-8 animate-in fade-in duration-500">
       <header className="mb-8">
         <h2 className="text-3xl font-bold text-sky-900">人脸情绪识别 (基于 PyTorch)</h2>
-        <p className="text-sky-600/80 mt-2">支持上传您的 ONNX 模型，分析静态图片或调用摄像头进行实时面部情绪分析</p>
+        <p className="text-sky-600/80 mt-2">支持上传您自己的 ONNX 模型，分析静态图片或调用摄像头进行实时面部情绪分析</p>
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -300,10 +351,10 @@ export function EmotionRecognition() {
                 <label className="block text-xs font-medium text-sky-800 mb-1">输入分辨率</label>
                 <input
                   type="number"
-                  value={inputSize}
+                  value="64 (不可更改)" 
                   onChange={(e) => setInputSize(e.target.value)}
                   className="w-full bg-white border border-sky-100 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-sky-500"
-                  placeholder="640"
+                  placeholder="64"
                 />
               </div>
               <div>
