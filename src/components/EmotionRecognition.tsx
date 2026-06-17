@@ -12,7 +12,7 @@ export function EmotionRecognition() {
   const [errorMessage, setErrorMessage] = useState('');
   
   // 模型与预处理配置
-  const [labels, setLabels] = useState('愤怒,厌恶,恐惧,开心,悲伤,惊讶,中性');
+  const [labels, setLabels] = useState('中性,开心,惊讶,悲伤,愤怒,厌恶,恐惧,轻蔑');
   const [inputSize, setInputSize] = useState('64');
   const [channels, setChannels] = useState<'3' | '1'>('1');
   const [normalization, setNormalization] = useState<'imagenet' | 'none'>('none');
@@ -162,7 +162,7 @@ export function EmotionRecognition() {
     const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
 
     // 创建尺寸为 [1, C, H, W] 的浮点数组 (PyTorch 默认格式 nchw)
-    const float32Data = new Float32Array(1 * c * targetSize * targetSize);
+    const float32Data = new Float32Array( c * targetSize * targetSize);
 
     for (let i = 0; i < targetSize * targetSize; i++) {
       // const offset = i * 4;
@@ -195,19 +195,15 @@ export function EmotionRecognition() {
       const b = imgData[offset + 2];
       let gray = 0.299 * r + 0.587 * g + 0.114 * b;
 
-      // 2. 归一化 (模型要求: 除以 255.0)
-      // 模型期望输入范围是 [0, 1]，不需要 ImageNet 均值/标准差
-      const normalizedValue = gray;
-
-      // 3. 填充数据
+      // 2. 填充数据
       // 因为是单通道，所以直接填入第一个通道
-      float32Data[i] = normalizedValue;
+      float32Data[i] = gray;
     }
-
-    const tensor = new ort.Tensor('float32', float32Data, [1, c, targetSize, targetSize]);
     
     // 动态获取模型输入名称
     const inputName = session.inputNames[0];
+    const tensor = new ort.Tensor('float32', float32Data, [1, 1, 64, 64]);
+    
     const feeds: Record<string, ort.Tensor> = {};
     feeds[inputName] = tensor;
 
@@ -216,36 +212,35 @@ export function EmotionRecognition() {
     const outputName = session.outputNames[0];
     const outputData = results[outputName].data;
 
-    // 获取预测结果
+    // 手动 Softmax 计算
     const logits = Array.from(outputData as Float32Array);
-    
-    // 手动寻找最大值，避免 Maximum call stack size exceeded
-    let maxLogit = -Infinity;
-    for (let i = 0; i < logits.length; i++) {
-      if (logits[i] > maxLogit) maxLogit = logits[i];
-    }
-    
-    // Softmax
-    const exps = logits.map(x => Math.exp(x - maxLogit)); 
+    const maxLogit = Math.max(...logits);
+    const exps = logits.map(x => Math.exp(x - maxLogit));
     const expSum = exps.reduce((a, b) => a + b, 0);
     const probs = exps.map(x => x / expSum);
 
-    // 寻找最大概率的索引
-    let maxIdx = 0;
-    let maxProb = -Infinity;
-    for (let i = 0; i < probs.length; i++) {
-      if (probs[i] > maxProb) {
-        maxProb = probs[i];
-        maxIdx = i;
-      }
-    }
+    const maxIdx = probs.indexOf(Math.max(...probs));
+    const maxProb = probs[maxIdx];
+
+    const officialLabels = [
+      '中性',     // 0
+      '开心',     // 1 (happiness)
+      '惊讶',     // 2 (surprise)
+      '悲伤',     // 3 (sadness)
+      '愤怒',     // 4 (anger)
+      '厌恶',     // 5 (disgust)
+      '恐惧',     // 6 (fear)
+      '轻蔑'      // 7 (contempt)
+    ];
 
     const labelArray = labels.split(',').map(s => s.trim());
+    // 如果用户没有自定义，或者自定义数量不对，使用官方默认
+    const useLabels = labelArray.length === 8 ? labelArray : officialLabels;
 
-    if (maxIdx >= 0 && maxIdx < labelArray.length) {
-      return `${labelArray[maxIdx]} (${(probs[maxIdx] * 100).toFixed(1)}%)`;
+    if (maxIdx < useLabels.length) {
+      return `${useLabels[maxIdx]} (${(maxProb * 100).toFixed(1)}%)`;
     } else {
-      return `未知类别索引: ${maxIdx} (${(probs[maxIdx] * 100).toFixed(1)}%)`;
+      return `未知 (${(maxProb * 100).toFixed(1)}%)`;
     }
   };
 
