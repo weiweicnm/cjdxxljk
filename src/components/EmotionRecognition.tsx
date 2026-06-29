@@ -176,7 +176,7 @@ export function EmotionRecognition() {
 
       // 2. 填充数据
       // 因为是单通道，所以直接填入第一个通道
-      float32Data[i] = gray/255;
+      float32Data[i] = ( gray/255 - 0.5 ) *2;
     }
     
     // 动态获取模型输入名称
@@ -207,8 +207,8 @@ export function EmotionRecognition() {
       '惊讶',     // 2 (surprise)
       '悲伤',     // 3 (sadness)
       '愤怒',     // 4 (anger)
-      '厌恶',     // 5 (disgust)
-      '恐惧',     // 6 (fear)
+      '恐惧',     // 5 (fear)
+      '厌恶',     // 6 (disgust)
       '轻蔑'      // 7 (contempt)
     ];
 
