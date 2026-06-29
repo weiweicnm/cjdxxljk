@@ -87,8 +87,8 @@ export function EmotionRecognition() {
     const loadDefaultModel = async () => {
       try {
         setModelStatus('loading');
-        // 确保 public/emotion-ferplus-12-int8.onnx 存在
-        const response = await fetch('/emotion-ferplus-12-int8.onnx');
+        // 确保 public/emotion-ferplus-8.onnx 存在
+        const response = await fetch('/emotion-ferplus-8.onnx');
         
         if (!response.ok) {
           throw new Error(`模型文件未找到或网络错误: ${response.status}`);
