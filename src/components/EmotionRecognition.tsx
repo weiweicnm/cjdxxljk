@@ -165,28 +165,7 @@ export function EmotionRecognition() {
     const float32Data = new Float32Array( c * targetSize * targetSize);
 
     for (let i = 0; i < targetSize * targetSize; i++) {
-      // const offset = i * 4;
-      // let r = imgData[offset] / 255.0;
-      // let g = imgData[offset + 1] / 255.0;
-      // let b = imgData[offset + 2] / 255.0;
 
-      // if (c === 3) {
-      //   if (normalization === 'imagenet') {
-      //     r = (r - 0.485) / 0.229;
-      //     g = (g - 0.456) / 0.224;
-      //     b = (b - 0.406) / 0.225;
-      //   }
-      //   float32Data[i] = r;
-      //   float32Data[i + targetSize * targetSize] = g;
-      //   float32Data[i + 2 * targetSize * targetSize] = b;
-      // } else {
-      //   // 单通道灰度
-      //   let gray = r * 0.299 + g * 0.587 + b * 0.114;
-      //   if (normalization === 'imagenet') {
-      //     gray = (gray - 0.5) / 0.5;
-      //   }
-      //   float32Data[i] = gray;
-      // }
       const offset = i * 4;
       // 1. 转灰度 (模型要求)
       // 使用加权平均法转换 RGB 为灰度
@@ -197,7 +176,7 @@ export function EmotionRecognition() {
 
       // 2. 填充数据
       // 因为是单通道，所以直接填入第一个通道
-      float32Data[i] = gray;
+      float32Data[i] = gray/255;
     }
     
     // 动态获取模型输入名称
