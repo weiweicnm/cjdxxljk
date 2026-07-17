@@ -14,7 +14,7 @@ export function EmotionRecognition() {
   // 模型与预处理配置
   const [labels, setLabels] = useState('惊讶,害怕,厌恶,开心,难过,生气,中性');
   const [inputSize, setInputSize] = useState('320');
-  const [channels, setChannels] = useState<'3' | '1'>('1');
+  const [channels, setChannels] = useState<'3' | '1'>('3');
   const [normalization, setNormalization] = useState<'imagenet' | 'none'>('none');
 
   // 工作模式选择
@@ -133,7 +133,7 @@ export function EmotionRecognition() {
   const performInference = async (source: CanvasImageSource): Promise<string> => {
     if (!session) throw new Error("模型未加载");
 
-    const targetSize = 320;
+    const targetSize = Number(inputSize);
     const c = 3;
 
     const canvas = document.createElement('canvas');
@@ -376,7 +376,7 @@ export function EmotionRecognition() {
             {modelStatus === 'error' && (
               <div className="flex items-start gap-2 text-rose-600 text-sm bg-rose-50 p-3 rounded-xl border border-rose-100">
                 <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-                <span>{errorMessage}</span>
+                <span>{errorMessage || '模型加载失败，请检查控制台或手动上传模型。'}</span>
               </div>
             )}
 
