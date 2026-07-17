@@ -197,7 +197,7 @@ export function EmotionRecognition() {
       const objConf = outputData[objConfIndex];
 
     // 过滤掉低置信度的预测框，提升性能
-      if (objConf < 0.25) continue;
+      if (objConf < 0) continue;
 
     // 寻找当前框内概率最高的情绪类别
       let maxClassScore = -1;
@@ -225,7 +225,7 @@ export function EmotionRecognition() {
   // 设置一个最终置信度阈值，避免误判
     console.log(`[Debug] Best Result: ${bestResult.label}, Score: ${bestResult.score.toFixed(4)}`);
  
-    if (bestResult.score > 0.3) {
+    if (bestResult.score > 0.01) {
       return `${bestResult.label} (${(bestResult.score * 100).toFixed(1)}%)`;
     } else {
       return "未识别出情绪";
