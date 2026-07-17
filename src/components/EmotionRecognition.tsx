@@ -234,7 +234,24 @@ export function EmotionRecognition() {
       return "未识别出情绪";
     }
   };
+  const runImagePrediction = async () => {
+    if (!session || !imageRef.current) return;
 
+    setIsPredicting(true);
+    setErrorMessage('');
+    setPrediction(null);
+
+    try {
+      const result = await performInference(imageRef.current);
+      setPrediction(result);
+    } catch (err: any) {
+      console.error(err);
+      setErrorMessage('预测失败: ' + (err.message || '未知错误'));
+      setModelStatus('error');
+    } finally {
+      setIsPredicting(false);
+    }
+  };
   const startCamera = async () => {
     setErrorMessage('');
     try {
