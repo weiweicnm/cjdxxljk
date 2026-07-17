@@ -168,9 +168,9 @@ export function EmotionRecognition() {
 
       const offset = i * 4;
 
-      float32Data[i] = imgData[offset];                     // R 通道
-      float32Data[i + targetSize * targetSize] = imgData[offset + 1] ;       // G 通道
-      float32Data[i + targetSize * targetSize * 2] = imgData[offset + 2] ;   // B 通道
+      float32Data[i] = imgData[offset] /255.0;                     // R 通道
+      float32Data[i + targetSize * targetSize] = imgData[offset + 1] /255.0;       // G 通道
+      float32Data[i + targetSize * targetSize * 2] = imgData[offset + 2] /255.0;   // B 通道
     }
     
     // 动态获取模型输入名称
@@ -225,7 +225,7 @@ export function EmotionRecognition() {
   // 设置一个最终置信度阈值，避免误判
     console.log(`[Debug] Best Result: ${bestResult.label}, Score: ${bestResult.score.toFixed(4)}`);
  
-    if (bestResult.score > 0.01) {
+    if (bestResult.score > 0) {
       return `${bestResult.label} (${(bestResult.score * 100).toFixed(1)}%)`;
     } else {
       return "未识别出情绪";
