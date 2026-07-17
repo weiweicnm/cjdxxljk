@@ -194,30 +194,29 @@ export function EmotionRecognition() {
     const numPredictions = dims[2];
 
     let bestResult = { score: 0, label: '' };
-// 2. 找到置信度最高的类别索引
+
     for (let i = 0; i < numPredictions; i++) {
-    // 获取当前预测框的“物体置信度” (objectness score)
-    // 它在第 4 个位置 (索引为 4)
+
       const objConfIndex = 4 * numPredictions + i;
       const objConf = outputData[objConfIndex];
 
     // 过滤掉低置信度的预测框，提升性能
-      if (objConf < 0.5) continue;
+      if (objConf < 0.25) continue;
 
     // 寻找当前框内概率最高的情绪类别
       let maxClassScore = -1;
       let classId = -1;
-      for (let c = 0; c < numClasses; c++) {
+
+      for (let cIdx = 0; cIdx < numClasses; cIdx++) {
       // 类别分数从索引 5 开始
-        const classScoreIndex = (5 + c) * numPredictions + i;
+        const classScoreIndex = (5 + cIdx) * numPredictions + i;
         const score = outputData[classScoreIndex];
         if (score > maxClassScore) {
           maxClassScore = score;
-          classId = c;
+          classId = cIdx;
         }
       }
 
-    // 最终置信度 = 物体置信度 * 类别置信度
       const finalScore = objConf * maxClassScore;
 
       if (finalScore > bestResult.score) {
@@ -228,12 +227,15 @@ export function EmotionRecognition() {
 
   // --- 4. 返回结果 ---
   // 设置一个最终置信度阈值，避免误判
-    if (bestResult.score > 0.6) {
+    console.log(`[Debug] Best Result: ${bestResult.label}, Score: ${bestResult.score.toFixed(4)}`);
+ 
+    if (bestResult.score > 0.3) {
       return `${bestResult.label} (${(bestResult.score * 100).toFixed(1)}%)`;
     } else {
       return "未识别出情绪";
     }
   };
+  
   const runImagePrediction = async () => {
     if (!session || !imageRef.current) return;
 
