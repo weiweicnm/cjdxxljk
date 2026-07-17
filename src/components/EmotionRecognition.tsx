@@ -183,7 +183,8 @@ export function EmotionRecognition() {
     const outputTensor = results[outputName];
     const outputData = outputTensor.data as Float32Array;
     const dims = outputTensor.dims; // [1, 11, 2100]
-
+    console.log("🔍 模型输出维度 (dims):", dims);
+    console.log("🔍 模型输出数据 (outputData):", outputData);
     const labelsArray = labels.split(',').map(label => label.trim());
     const numClasses = labelsArray.length; // 类别数量，应为 7
     const numPredictions = dims[2];
