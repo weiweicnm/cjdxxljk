@@ -4,7 +4,6 @@ import * as ort from 'onnxruntime-web';
 import { clsx } from 'clsx';
 
 // WASM 资源路径：国内环境建议替换为本地资源或国内镜像
-// 备选国内镜像："https://unpkg.zhimg.com/onnxruntime-web@latest/dist/"
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 
 export function EmotionRecognition() {
@@ -73,7 +72,7 @@ export function EmotionRecognition() {
     try {
       const buffer = await file.arrayBuffer();
       const newSession = await ort.InferenceSession.create(buffer, { 
-        executionProviders: ['webgl', 'wasm'] // 优先WebGL加速，自动回退WASM
+        executionProviders: ['webgl', 'wasm']
       });
       setSession(newSession);
       setModelStatus('ready');
@@ -110,7 +109,7 @@ export function EmotionRecognition() {
         setModelStatus('error');
         setErrorMessage(
           '默认模型加载失败。请检查控制台错误，' +
-          '或手动上传模型文件 (emotion-ferplus-8.onnx)'
+          '或手动上传模型文件'
         );
       }
     };
@@ -130,7 +129,7 @@ export function EmotionRecognition() {
     reader.readAsDataURL(file);
   };
 
-  // ========== 核心修复：完整重写推理预处理与后处理逻辑 ==========
+  // ========== 核心修复：移除重复Sigmoid + 对齐YOLO输出格式 ==========
   const performInference = async (source: CanvasImageSource): Promise<string> => {
     if (!session) throw new Error("模型未加载");
 
@@ -151,7 +150,7 @@ export function EmotionRecognition() {
       sHeight = source.videoHeight;
     }
 
-    // 修复1：Letterbox 等比例缩放（与YOLO训练预处理一致，替代居中裁剪）
+    // Letterbox 等比例缩放（与YOLO训练预处理一致）
     if (sWidth > 0 && sHeight > 0) {
       const ratio = Math.min(targetSize / sWidth, targetSize / sHeight);
       const newW = Math.round(sWidth * ratio);
@@ -159,7 +158,6 @@ export function EmotionRecognition() {
       const padX = (targetSize - newW) / 2;
       const padY = (targetSize - newH) / 2;
 
-      // 填充中性灰背景（与训练时的letterbox填充一致）
       ctx.fillStyle = '#808080';
       ctx.fillRect(0, 0, targetSize, targetSize);
       ctx.drawImage(source, padX, padY, newW, newH);
@@ -170,13 +168,12 @@ export function EmotionRecognition() {
     const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
     const float32Data = new Float32Array(channelNum * targetSize * targetSize);
 
-    // ImageNet 标准化参数（BGR顺序，与通道顺序对应）
+    // ImageNet 标准化参数（BGR顺序）
     const meanBGR = [0.406, 0.456, 0.485];
     const stdBGR = [0.225, 0.224, 0.229];
 
     for (let i = 0; i < targetSize * targetSize; i++) {
       const offset = i * 4;
-      // 修复2：BGR 通道顺序（与Ultralytics训练时OpenCV读取格式对齐）
       const b = imgData[offset + 2] / 255.0;
       const g = imgData[offset + 1] / 255.0;
       const r = imgData[offset] / 255.0;
@@ -192,7 +189,6 @@ export function EmotionRecognition() {
           float32Data[i * 3 + 2] = r;
         }
       } else {
-        // 灰度图模式：标准加权灰度转换
         const gray = 0.299 * r + 0.587 * g + 0.114 * b;
         float32Data[i] = gray;
       }
@@ -212,10 +208,10 @@ export function EmotionRecognition() {
     const numClasses = labelsArray.length;
     const numPredictions = dims[2];
 
-    const confThreshold = 0.35; // 置信度阈值，过滤背景锚框
+    const confThreshold = 0.25;
     let bestResult = { score: -1, label: '' };
 
-    // 修复3：正确解析YOLO Detect头输出（4坐标 + 7类别，无单独obj_conf）
+    // ===== 修复：移除重复Sigmoid，直接使用模型原始概率输出 =====
     for (let i = 0; i < numPredictions; i++) {
       let maxClassScore = -Infinity;
       let classId = -1;
@@ -223,19 +219,14 @@ export function EmotionRecognition() {
       // 类别从第4通道开始（索引4~10对应7类情绪）
       for (let cIdx = 0; cIdx < numClasses; cIdx++) {
         const classScoreIndex = (4 + cIdx) * numPredictions + i;
-        const rawScore = outputData[classScoreIndex];
+        const score = outputData[classScoreIndex]; // 模型输出已带Sigmoid，直接用
         
-        // Sigmoid 激活（将原始logits转为0~1概率）
-        // 若模型导出时已包含Sigmoid，请注释掉下面这行，直接使用 rawScore
-        const score = 1 / (1 + Math.exp(-rawScore));
-
         if (score > maxClassScore) {
           maxClassScore = score;
           classId = cIdx;
         }
       }
 
-      // 直接用类别置信度作为最终分数
       if (maxClassScore > confThreshold && maxClassScore > bestResult.score) {
         bestResult.score = maxClassScore;
         bestResult.label = labelsArray[classId];
