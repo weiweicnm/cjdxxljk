@@ -3,7 +3,8 @@ import { UploadCloud, Image as ImageIcon, Settings, CheckCircle2, AlertCircle, L
 import * as ort from 'onnxruntime-web';
 import { clsx } from 'clsx';
 
-// 设置 WASM 路径，防止 Vite 打包时在使用中找不到本地 WebAssembly 文件
+// WASM 资源路径：国内环境建议替换为本地资源或国内镜像
+// 备选国内镜像："https://unpkg.zhimg.com/onnxruntime-web@latest/dist/"
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 
 export function EmotionRecognition() {
@@ -55,7 +56,7 @@ export function EmotionRecognition() {
         } finally {
           isProcessingRef.current = false;
         }
-      }, 300); // 大约一秒3帧更新情绪，性能与平滑度的平衡
+      }, 300);
     }
     return () => clearInterval(interval);
   }, [isCameraRunning, session, mode, inputSize, channels, normalization, labels]);
@@ -71,7 +72,9 @@ export function EmotionRecognition() {
 
     try {
       const buffer = await file.arrayBuffer();
-      const newSession = await ort.InferenceSession.create(buffer, { executionProviders: ['wasm'] });
+      const newSession = await ort.InferenceSession.create(buffer, { 
+        executionProviders: ['webgl', 'wasm'] // 优先WebGL加速，自动回退WASM
+      });
       setSession(newSession);
       setModelStatus('ready');
       setImageSrc(null);
@@ -82,12 +85,11 @@ export function EmotionRecognition() {
     }
   };
 
-  // 自动拉取模型
+  // 自动拉取默认模型
   useEffect(() => {
     const loadDefaultModel = async () => {
       try {
         setModelStatus('loading');
-        // 确保 public/best.onnx 存在
         const response = await fetch('/best.onnx');
         
         if (!response.ok) {
@@ -95,9 +97,8 @@ export function EmotionRecognition() {
         }
 
         const buffer = await response.arrayBuffer();
-        // 注意：如果模型较大，建议增加进度反馈
         const session = await ort.InferenceSession.create(buffer, { 
-          executionProviders: ['wasm'] 
+          executionProviders: ['webgl', 'wasm']
         });
         
         setSession(session);
@@ -114,10 +115,9 @@ export function EmotionRecognition() {
       }
     };
 
-    // 只在组件挂载时执行一次
     loadDefaultModel();
-  }, []); // 依赖数组为空
-  // 手动选择模型
+  }, []);
+
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -130,114 +130,126 @@ export function EmotionRecognition() {
     reader.readAsDataURL(file);
   };
 
+  // ========== 核心修复：完整重写推理预处理与后处理逻辑 ==========
   const performInference = async (source: CanvasImageSource): Promise<string> => {
-  if (!session) throw new Error("模型未加载");
+    if (!session) throw new Error("模型未加载");
 
-  const targetSize = Number(inputSize);
-  const c = Number(channels); // 修复：使用配置的通道数，不再写死
+    const targetSize = Number(inputSize);
+    const channelNum = Number(channels);
 
-  const canvas = document.createElement('canvas');
-  canvas.width = targetSize;
-  canvas.height = targetSize;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error("无法创建画布处理图像");
+    const canvas = document.createElement('canvas');
+    canvas.width = targetSize;
+    canvas.height = targetSize;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error("无法创建画布处理图像");
 
-  // 居中裁剪图像
-  let sWidth = typeof source.width === 'number' ? source.width : 0;
-  let sHeight = typeof source.height === 'number' ? source.height : 0;
-  if (source instanceof HTMLVideoElement) {
-    sWidth = source.videoWidth;
-    sHeight = source.videoHeight;
-  }
-
-  if (sWidth > 0 && sHeight > 0) {
-    const size = Math.min(sWidth, sHeight);
-    const sx = (sWidth - size) / 2;
-    const sy = (sHeight - size) / 2;
-    ctx.drawImage(source, sx, sy, size, size, 0, 0, targetSize, targetSize);
-  } else {
-    ctx.drawImage(source, 0, 0, targetSize, targetSize);
-  }
-
-  const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
-  const float32Data = new Float32Array(c * targetSize * targetSize);
-
-  // ImageNet 标准化参数
-  const mean = [0.485, 0.456, 0.406];
-  const std = [0.229, 0.224, 0.225];
-
-  for (let i = 0; i < targetSize * targetSize; i++) {
-    const offset = i * 4;
-    let r = imgData[offset] / 255.0;
-    let g = imgData[offset + 1] / 255.0;
-    let b = imgData[offset + 2] / 255.0;
-
-    // 修复：实现归一化配置
-    if (normalization === 'imagenet') {
-      r = (r - mean[0]) / std[0];
-      g = (g - mean[1]) / std[1];
-      b = (b - mean[2]) / std[2];
+    // 获取源图像尺寸
+    let sWidth = typeof source.width === 'number' ? source.width : 0;
+    let sHeight = typeof source.height === 'number' ? source.height : 0;
+    if (source instanceof HTMLVideoElement) {
+      sWidth = source.videoWidth;
+      sHeight = source.videoHeight;
     }
 
-    if (c === 3) {
-      float32Data[i * 3] = r;
-      float32Data[i * 3 + 1] = g;
-      float32Data[i * 3 + 2] = b;
+    // 修复1：Letterbox 等比例缩放（与YOLO训练预处理一致，替代居中裁剪）
+    if (sWidth > 0 && sHeight > 0) {
+      const ratio = Math.min(targetSize / sWidth, targetSize / sHeight);
+      const newW = Math.round(sWidth * ratio);
+      const newH = Math.round(sHeight * ratio);
+      const padX = (targetSize - newW) / 2;
+      const padY = (targetSize - newH) / 2;
+
+      // 填充中性灰背景（与训练时的letterbox填充一致）
+      ctx.fillStyle = '#808080';
+      ctx.fillRect(0, 0, targetSize, targetSize);
+      ctx.drawImage(source, padX, padY, newW, newH);
     } else {
-      // 灰度图模式：标准加权灰度转换
-      const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-      float32Data[i] = gray;
+      ctx.drawImage(source, 0, 0, targetSize, targetSize);
     }
-  }
 
-  const inputName = session.inputNames[0];
-  const tensor = new ort.Tensor('float32', float32Data, [1, c, targetSize, targetSize]);
-  
-  const results = await session.run({ [inputName]: tensor });
-  const outputName = session.outputNames[0];
-  const outputTensor = results[outputName];
-  const outputData = outputTensor.data as Float32Array;
-  const dims = outputTensor.dims; // [1, 11, 2100]
-  const labelsArray = labels.split(',').map(l => l.trim());
-  const numClasses = labelsArray.length;
-  const numPredictions = dims[2];
+    const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
+    const float32Data = new Float32Array(channelNum * targetSize * targetSize);
 
-  const confThreshold = 0.25; // 置信度阈值
-  let bestResult = { score: -1, label: '' };
+    // ImageNet 标准化参数（BGR顺序，与通道顺序对应）
+    const meanBGR = [0.406, 0.456, 0.485];
+    const stdBGR = [0.225, 0.224, 0.229];
 
-  // 遍历所有锚框
-  for (let i = 0; i < numPredictions; i++) {
-    let maxClassScore = -Infinity;
-    let classId = -1;
+    for (let i = 0; i < targetSize * targetSize; i++) {
+      const offset = i * 4;
+      // 修复2：BGR 通道顺序（与Ultralytics训练时OpenCV读取格式对齐）
+      const b = imgData[offset + 2] / 255.0;
+      const g = imgData[offset + 1] / 255.0;
+      const r = imgData[offset] / 255.0;
 
-    // 修复：类别从第 4 通道开始，索引 4~10 对应 7 个类别
-    for (let cIdx = 0; cIdx < numClasses; cIdx++) {
-      const classScoreIndex = (4 + cIdx) * numPredictions + i;
-      const rawScore = outputData[classScoreIndex];
-      // Sigmoid 激活，将 logits 转为 0~1 概率
-      const score = 1 / (1 + Math.exp(-rawScore));
-      
-      if (score > maxClassScore) {
-        maxClassScore = score;
-        classId = cIdx;
+      if (channelNum === 3) {
+        if (normalization === 'imagenet') {
+          float32Data[i * 3]     = (b - meanBGR[0]) / stdBGR[0];
+          float32Data[i * 3 + 1] = (g - meanBGR[1]) / stdBGR[1];
+          float32Data[i * 3 + 2] = (r - meanBGR[2]) / stdBGR[2];
+        } else {
+          float32Data[i * 3]     = b;
+          float32Data[i * 3 + 1] = g;
+          float32Data[i * 3 + 2] = r;
+        }
+      } else {
+        // 灰度图模式：标准加权灰度转换
+        const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+        float32Data[i] = gray;
       }
     }
 
-    // 直接用类别最大置信度作为最终分数（无单独 obj_conf）
-    if (maxClassScore > confThreshold && maxClassScore > bestResult.score) {
-      bestResult.score = maxClassScore;
-      bestResult.label = labelsArray[classId];
+    // 构建输入张量
+    const inputName = session.inputNames[0];
+    const tensor = new ort.Tensor('float32', float32Data, [1, channelNum, targetSize, targetSize]);
+    
+    // 运行推理
+    const results = await session.run({ [inputName]: tensor });
+    const outputName = session.outputNames[0];
+    const outputTensor = results[outputName];
+    const outputData = outputTensor.data as Float32Array;
+    const dims = outputTensor.dims; // [1, 11, 2100]
+    const labelsArray = labels.split(',').map(label => label.trim());
+    const numClasses = labelsArray.length;
+    const numPredictions = dims[2];
+
+    const confThreshold = 0.35; // 置信度阈值，过滤背景锚框
+    let bestResult = { score: -1, label: '' };
+
+    // 修复3：正确解析YOLO Detect头输出（4坐标 + 7类别，无单独obj_conf）
+    for (let i = 0; i < numPredictions; i++) {
+      let maxClassScore = -Infinity;
+      let classId = -1;
+
+      // 类别从第4通道开始（索引4~10对应7类情绪）
+      for (let cIdx = 0; cIdx < numClasses; cIdx++) {
+        const classScoreIndex = (4 + cIdx) * numPredictions + i;
+        const rawScore = outputData[classScoreIndex];
+        
+        // Sigmoid 激活（将原始logits转为0~1概率）
+        // 若模型导出时已包含Sigmoid，请注释掉下面这行，直接使用 rawScore
+        const score = 1 / (1 + Math.exp(-rawScore));
+
+        if (score > maxClassScore) {
+          maxClassScore = score;
+          classId = cIdx;
+        }
+      }
+
+      // 直接用类别置信度作为最终分数
+      if (maxClassScore > confThreshold && maxClassScore > bestResult.score) {
+        bestResult.score = maxClassScore;
+        bestResult.label = labelsArray[classId];
+      }
     }
-  }
 
-  console.log(`[Debug] Best Result: ${bestResult.label}, Score: ${bestResult.score.toFixed(4)}`);
+    console.log(`[Debug] Best Result: ${bestResult.label}, Score: ${bestResult.score.toFixed(4)}`);
 
-  if (bestResult.score > confThreshold) {
-    return `${bestResult.label} (${(bestResult.score * 100).toFixed(1)}%)`;
-  } else {
-    return "未识别出情绪";
-  }
-};
+    if (bestResult.score > confThreshold) {
+      return `${bestResult.label} (${(bestResult.score * 100).toFixed(1)}%)`;
+    } else {
+      return "未识别出情绪";
+    }
+  };
   
   const runImagePrediction = async () => {
     if (!session || !imageRef.current) return;
@@ -257,6 +269,7 @@ export function EmotionRecognition() {
       setIsPredicting(false);
     }
   };
+
   const startCamera = async () => {
     setErrorMessage('');
     try {
