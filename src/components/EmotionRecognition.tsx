@@ -12,8 +12,8 @@ export function EmotionRecognition() {
   const [errorMessage, setErrorMessage] = useState('');
   
   // 模型与预处理配置
-  const [labels, setLabels] = useState('中性,开心,惊讶,悲伤,愤怒,厌恶,恐惧,轻蔑');
-  const [inputSize, setInputSize] = useState('64');
+  const [labels, setLabels] = useState('惊讶,害怕,厌恶,开心,难过,生气,中性');
+  const [inputSize, setInputSize] = useState('320');
   const [channels, setChannels] = useState<'3' | '1'>('1');
   const [normalization, setNormalization] = useState<'imagenet' | 'none'>('none');
 
@@ -87,8 +87,8 @@ export function EmotionRecognition() {
     const loadDefaultModel = async () => {
       try {
         setModelStatus('loading');
-        // 确保 public/emotion-ferplus-8.onnx 存在
-        const response = await fetch('/emotion-ferplus-8.onnx');
+        // 确保 public/best.onnx 存在
+        const response = await fetch('/best.onnx');
         
         if (!response.ok) {
           throw new Error(`模型文件未找到或网络错误: ${response.status}`);
@@ -133,8 +133,8 @@ export function EmotionRecognition() {
   const performInference = async (source: CanvasImageSource): Promise<string> => {
     if (!session) throw new Error("模型未加载");
 
-    const targetSize = 64;
-    const c = 1;
+    const targetSize = 320;
+    const c = 3;
 
     const canvas = document.createElement('canvas');
     canvas.width = targetSize;
@@ -172,16 +172,15 @@ export function EmotionRecognition() {
       const r = imgData[offset];
       const g = imgData[offset + 1];
       const b = imgData[offset + 2];
-      let gray = 0.299 * r + 0.587 * g + 0.114 * b;
 
-      // 2. 填充数据
-      // 因为是单通道，所以直接填入第一个通道
-      float32Data[i] = (gray - 127.5 );
+      float32Data[i] = r / 255.0;                     // R 通道
+      float32Data[i + targetSize * targetSize] = g / 255.0;       // G 通道
+      float32Data[i + targetSize * targetSize * 2] = b / 255.0;   // B 通道
     }
     
     // 动态获取模型输入名称
     const inputName = session.inputNames[0];
-    const tensor = new ort.Tensor('float32', float32Data, [1, 1, 64, 64]);
+    const tensor = new ort.Tensor('float32', float32Data, [1, c, targetSize, targetSize]);
     
     const feeds: Record<string, ort.Tensor> = {};
     feeds[inputName] = tensor;
@@ -189,38 +188,99 @@ export function EmotionRecognition() {
     // 运行推理
     const results = await session.run(feeds);
     const outputName = session.outputNames[0];
-    const outputData = results[outputName].data;
+    const outputData = results[outputName].data as Float32Array;
 
-    // 手动 Softmax 计算
-    const logits = Array.from(outputData as Float32Array);
-    const maxLogit = Math.max(...logits);
-    const exps = logits.map(x => Math.exp(x - maxLogit));
-    const expSum = exps.reduce((a, b) => a + b, 0);
-    const probs = exps.map(x => x / expSum);
-
-    const maxIdx = probs.indexOf(Math.max(...probs));
-    const maxProb = probs[maxIdx];
-
-    const officialLabels = [
-      '中性',     // 0
-      '开心',     // 1 (happiness)
-      '惊讶',     // 2 (surprise)
-      '悲伤',     // 3 (sadness)
-      '愤怒',     // 4 (anger)
-      '恐惧',     // 5 (fear)
-      '厌恶',     // 6 (disgust)
-      '轻蔑'      // 7 (contempt)
+    const labels = [
+      '惊讶',     // 0
+      '害怕',     // 1 
+      '厌恶',     // 2 
+      '开心',     // 3 
+      '难过',     // 4 
+      '生气',     // 5 
+      '中性',     // 6 
     ];
+    const numClasses = labels.length;
+    const numBoxes = 2100;
+    const boxInfo = 4; // x, y, w, h
 
-    const labelArray = labels.split(',').map(s => s.trim());
-    // 如果用户没有自定义，或者自定义数量不对，使用官方默认
-    const useLabels = labelArray.length === 8 ? labelArray : officialLabels;
+    let detections = [];
 
-    if (maxIdx < useLabels.length) {
-      return `${useLabels[maxIdx]} (${(maxProb * 100).toFixed(1)}%)`;
-    } else {
-      return `未知 (${(maxProb * 100).toFixed(1)}%)`;
+    for (let i = 0; i < numBoxes; i++) {
+      // 提取类别置信度，找到最大值
+      let maxClassScore = -1;
+      let classId = -1;
+      for (let c = 0; c < numClasses; c++) {
+        const score = outputData[i * (boxInfo + numClasses) + boxInfo + c];
+        if (score > maxClassScore) {
+          maxClassScore = score;
+          classId = c;
+        }
+      }
+
+      // 过滤掉低置信度的预测 (阈值可调)
+      if (maxClassScore > 0.25) {
+        // 提取边界框信息 (中心点x, 中心点y, 宽, 高)
+        // 注意：YOLO输出是归一化的，需要乘以图像尺寸
+        const cx = outputData[i * (boxInfo + numClasses) + 0] * targetSize;
+        const cy = outputData[i * (boxInfo + numClasses) + 1] * targetSize;
+        const w = outputData[i * (boxInfo + numClasses) + 2] * targetSize;
+        const h = outputData[i * (boxInfo + numClasses) + 3] * targetSize;
+
+        detections.push({
+          x: cx - w / 2, // 转换为左上角坐标
+          y: cy - h / 2,
+          width: w,
+          height: h,
+          score: maxClassScore,
+          classId: classId,
+          label: labels[classId]
+        });
+      }
     }
+
+    // 6. 非极大值抑制 (NMS) - 去除重叠的框
+    if (detections.length === 0) {
+      return "未检测到人脸";
+    }
+
+    // 按置信度从高到低排序
+    detections.sort((a, b) => b.score - a.score);
+
+    const nmsThreshold = 0.45; // IoU 阈值
+    const finalDetections = [];
+
+    while (detections.length > 0) {
+      const current = detections.shift()!;
+      finalDetections.push(current);
+
+      detections = detections.filter(other => {
+        const iou = calculateIoU(current, other);
+        return iou < nmsThreshold;
+      });
+    }
+
+    // 7. 返回结果 (返回置信度最高的那个)
+    if (finalDetections.length > 0) {
+      const best = finalDetections[0];
+      return `${best.label} (${(best.score * 100).toFixed(1)}%)`;
+    } else {
+      return "未检测到人脸";
+    }
+  };
+
+  // --- 辅助函数：计算两个框的 IoU (交并比) ---
+  function calculateIoU(box1: any, box2: any) {
+    const x1 = Math.max(box1.x, box2.x);
+    const y1 = Math.max(box1.y, box2.y);
+    const x2 = Math.min(box1.x + box1.width, box2.x + box2.width);
+    const y2 = Math.min(box1.y + box1.height, box2.y + box2.height);
+
+    const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+    const area1 = box1.width * box1.height;
+    const area2 = box2.width * box2.height;
+    const union = area1 + area2 - intersection;
+
+    return union === 0 ? 0 : intersection / union;
   };
 
   const runImagePrediction = async () => {
