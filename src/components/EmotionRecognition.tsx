@@ -3,7 +3,6 @@ import { UploadCloud, Image as ImageIcon, Settings, CheckCircle2, AlertCircle, L
 import * as ort from 'onnxruntime-web';
 import { clsx } from 'clsx';
 
-// WASM 资源路径：国内环境建议替换为本地资源或国内镜像
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 
 export function EmotionRecognition() {
@@ -11,20 +10,16 @@ export function EmotionRecognition() {
   const [modelStatus, setModelStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState('');
   
-  // 模型与预处理配置
+  // 模型与预处理配置 - 默认值已对齐 Ultralytics 标准训练
   const [labels, setLabels] = useState('惊讶,害怕,厌恶,开心,难过,生气,中性');
   const [inputSize, setInputSize] = useState('320');
   const [channels, setChannels] = useState<'3' | '1'>('3');
   const [normalization, setNormalization] = useState<'imagenet' | 'none'>('none');
 
-  // 工作模式选择
   const [mode, setMode] = useState<'image' | 'camera'>('image');
-
-  // 图片识别状态
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const imageRef = useRef<HTMLImageElement>(null);
 
-  // 摄像头识别状态
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isCameraRunning, setIsCameraRunning] = useState(false);
   const isProcessingRef = useRef<boolean>(false);
@@ -32,14 +27,12 @@ export function EmotionRecognition() {
   const [prediction, setPrediction] = useState<string | null>(null);
   const [isPredicting, setIsPredicting] = useState(false);
 
-  // 组件卸载时清理摄像头
   useEffect(() => {
     return () => {
       stopCamera();
     };
   }, []);
 
-  // 实时推理循环
   useEffect(() => {
     let interval: any;
     if (isCameraRunning && session && mode === 'camera') {
@@ -60,7 +53,6 @@ export function EmotionRecognition() {
     return () => clearInterval(interval);
   }, [isCameraRunning, session, mode, inputSize, channels, normalization, labels]);
 
-
   const handleModelUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -72,7 +64,7 @@ export function EmotionRecognition() {
     try {
       const buffer = await file.arrayBuffer();
       const newSession = await ort.InferenceSession.create(buffer, { 
-        executionProviders: ['webgl', 'wasm']
+        executionProviders: ['wasm'] // 先禁用webgl避免精度问题，确认可用后再开启
       });
       setSession(newSession);
       setModelStatus('ready');
@@ -84,7 +76,6 @@ export function EmotionRecognition() {
     }
   };
 
-  // 自动拉取默认模型
   useEffect(() => {
     const loadDefaultModel = async () => {
       try {
@@ -97,7 +88,7 @@ export function EmotionRecognition() {
 
         const buffer = await response.arrayBuffer();
         const session = await ort.InferenceSession.create(buffer, { 
-          executionProviders: ['webgl', 'wasm']
+          executionProviders: ['wasm']
         });
         
         setSession(session);
@@ -129,7 +120,7 @@ export function EmotionRecognition() {
     reader.readAsDataURL(file);
   };
 
-  // ========== 核心修复：移除重复Sigmoid + 对齐YOLO输出格式 ==========
+  // ========== 核心推理函数 - 已全部对齐 Ultralytics 标准 ==========
   const performInference = async (source: CanvasImageSource): Promise<string> => {
     if (!session) throw new Error("模型未加载");
 
@@ -150,7 +141,7 @@ export function EmotionRecognition() {
       sHeight = source.videoHeight;
     }
 
-    // Letterbox 等比例缩放（与YOLO训练预处理一致）
+    // ===== 修复1：标准 Letterbox 缩放 + 官方填充色 114 =====
     if (sWidth > 0 && sHeight > 0) {
       const ratio = Math.min(targetSize / sWidth, targetSize / sHeight);
       const newW = Math.round(sWidth * ratio);
@@ -158,7 +149,8 @@ export function EmotionRecognition() {
       const padX = (targetSize - newW) / 2;
       const padY = (targetSize - newH) / 2;
 
-      ctx.fillStyle = '#808080';
+      // Ultralytics 默认填充灰度值 114
+      ctx.fillStyle = 'rgb(114, 114, 114)';
       ctx.fillRect(0, 0, targetSize, targetSize);
       ctx.drawImage(source, padX, padY, newW, newH);
     } else {
@@ -168,25 +160,27 @@ export function EmotionRecognition() {
     const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
     const float32Data = new Float32Array(channelNum * targetSize * targetSize);
 
-    // ImageNet 标准化参数（BGR顺序）
-    const meanBGR = [0.406, 0.456, 0.485];
-    const stdBGR = [0.225, 0.224, 0.229];
+    // ImageNet 标准化参数 (RGB 顺序)
+    const meanRGB = [0.485, 0.456, 0.406];
+    const stdRGB = [0.229, 0.224, 0.225];
 
+    // ===== 修复2：RGB 通道顺序（与 PyTorch 训练输入一致） =====
     for (let i = 0; i < targetSize * targetSize; i++) {
       const offset = i * 4;
-      const b = imgData[offset + 2] / 255.0;
-      const g = imgData[offset + 1] / 255.0;
       const r = imgData[offset] / 255.0;
+      const g = imgData[offset + 1] / 255.0;
+      const b = imgData[offset + 2] / 255.0;
 
       if (channelNum === 3) {
         if (normalization === 'imagenet') {
-          float32Data[i * 3]     = (b - meanBGR[0]) / stdBGR[0];
-          float32Data[i * 3 + 1] = (g - meanBGR[1]) / stdBGR[1];
-          float32Data[i * 3 + 2] = (r - meanBGR[2]) / stdBGR[2];
+          float32Data[i * 3]     = (r - meanRGB[0]) / stdRGB[0];
+          float32Data[i * 3 + 1] = (g - meanRGB[1]) / stdRGB[1];
+          float32Data[i * 3 + 2] = (b - meanRGB[2]) / stdRGB[2];
         } else {
-          float32Data[i * 3]     = b;
+          // 默认：仅除以 255，与 Ultralytics 训练一致
+          float32Data[i * 3]     = r;
           float32Data[i * 3 + 1] = g;
-          float32Data[i * 3 + 2] = r;
+          float32Data[i * 3 + 2] = b;
         }
       } else {
         const gray = 0.299 * r + 0.587 * g + 0.114 * b;
@@ -194,7 +188,7 @@ export function EmotionRecognition() {
       }
     }
 
-    // 构建输入张量
+    // 构建 NCHW 格式输入张量
     const inputName = session.inputNames[0];
     const tensor = new ort.Tensor('float32', float32Data, [1, channelNum, targetSize, targetSize]);
     
@@ -209,30 +203,45 @@ export function EmotionRecognition() {
     const numPredictions = dims[2];
 
     const confThreshold = 0.25;
-    let bestResult = { score: -1, label: '' };
+    let bestResult = { score: -1, label: '', boxIndex: -1 };
 
-    // ===== 修复：移除重复Sigmoid，直接使用模型原始概率输出 =====
+    // ===== 修复3：标准 YOLO 后处理 + Sigmoid 激活 =====
+    // 输出格式：[1, 4 + numClasses, numPredictions]
+    // 0~3: 边界框坐标，4~10: 7类情绪 logits
     for (let i = 0; i < numPredictions; i++) {
       let maxClassScore = -Infinity;
       let classId = -1;
 
-      // 类别从第4通道开始（索引4~10对应7类情绪）
+      // 遍历7个情绪类别
       for (let cIdx = 0; cIdx < numClasses; cIdx++) {
         const classScoreIndex = (4 + cIdx) * numPredictions + i;
-        const score = outputData[classScoreIndex]; // 模型输出已带Sigmoid，直接用
-        
+        const rawLogit = outputData[classScoreIndex];
+        // Sigmoid 激活：将 logits 转为 0~1 概率
+        const score = 1 / (1 + Math.exp(-rawLogit));
+
         if (score > maxClassScore) {
           maxClassScore = score;
           classId = cIdx;
         }
       }
 
+      // 只保留置信度达标的锚框，过滤背景干扰
       if (maxClassScore > confThreshold && maxClassScore > bestResult.score) {
         bestResult.score = maxClassScore;
         bestResult.label = labelsArray[classId];
+        bestResult.boxIndex = i;
       }
     }
 
+    // 调试日志：打印最优结果的各类别详细分数
+    if (bestResult.boxIndex >= 0) {
+      console.log("=== 最优锚框各类别分数 ===");
+      labelsArray.forEach((label, idx) => {
+        const raw = outputData[(4 + idx) * numPredictions + bestResult.boxIndex];
+        const prob = 1 / (1 + Math.exp(-raw));
+        console.log(`${label}: ${prob.toFixed(4)} (raw: ${raw.toFixed(2)})`);
+      });
+    }
     console.log(`[Debug] Best Result: ${bestResult.label}, Score: ${bestResult.score.toFixed(4)}`);
 
     if (bestResult.score > confThreshold) {
@@ -370,8 +379,8 @@ export function EmotionRecognition() {
                 onChange={(e) => setNormalization(e.target.value as 'imagenet' | 'none')}
                 className="w-full bg-white border border-sky-100 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-sky-500"
               >
-                <option value="imagenet">ImageNet 标准化 (PyTorch 默认)</option>
-                <option value="none">仅缩放到 0 ~ 1</option>
+                <option value="none">仅缩放到 0 ~ 1（Ultralytics 默认）</option>
+                <option value="imagenet">ImageNet 标准化</option>
               </select>
             </div>
 
