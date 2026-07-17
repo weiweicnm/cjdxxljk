@@ -385,10 +385,10 @@ export function EmotionRecognition() {
                 <label className="block text-xs font-medium text-sky-800 mb-1">输入分辨率</label>
                 <input
                   type="number"
-                  value="64 (不可更改)" 
+                  value={inputSize}
                   onChange={(e) => setInputSize(e.target.value)}
                   className="w-full bg-white border border-sky-100 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-sky-500"
-                  placeholder="64"
+                  placeholder="320"
                 />
               </div>
               <div>
