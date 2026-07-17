@@ -131,106 +131,113 @@ export function EmotionRecognition() {
   };
 
   const performInference = async (source: CanvasImageSource): Promise<string> => {
-    if (!session) throw new Error("模型未加载");
+  if (!session) throw new Error("模型未加载");
 
-    const targetSize = Number(inputSize);
-    const c = 3;
+  const targetSize = Number(inputSize);
+  const c = Number(channels); // 修复：使用配置的通道数，不再写死
 
-    const canvas = document.createElement('canvas');
-    canvas.width = targetSize;
-    canvas.height = targetSize;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error("无法创建画布处理图像");
+  const canvas = document.createElement('canvas');
+  canvas.width = targetSize;
+  canvas.height = targetSize;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error("无法创建画布处理图像");
 
-    // 居中裁剪图像
-    let sWidth = typeof source.width === 'number' ? source.width : 0;
-    let sHeight = typeof source.height === 'number' ? source.height : 0;
-    if (source instanceof HTMLVideoElement) {
-      sWidth = source.videoWidth;
-      sHeight = source.videoHeight;
+  // 居中裁剪图像
+  let sWidth = typeof source.width === 'number' ? source.width : 0;
+  let sHeight = typeof source.height === 'number' ? source.height : 0;
+  if (source instanceof HTMLVideoElement) {
+    sWidth = source.videoWidth;
+    sHeight = source.videoHeight;
+  }
+
+  if (sWidth > 0 && sHeight > 0) {
+    const size = Math.min(sWidth, sHeight);
+    const sx = (sWidth - size) / 2;
+    const sy = (sHeight - size) / 2;
+    ctx.drawImage(source, sx, sy, size, size, 0, 0, targetSize, targetSize);
+  } else {
+    ctx.drawImage(source, 0, 0, targetSize, targetSize);
+  }
+
+  const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
+  const float32Data = new Float32Array(c * targetSize * targetSize);
+
+  // ImageNet 标准化参数
+  const mean = [0.485, 0.456, 0.406];
+  const std = [0.229, 0.224, 0.225];
+
+  for (let i = 0; i < targetSize * targetSize; i++) {
+    const offset = i * 4;
+    let r = imgData[offset] / 255.0;
+    let g = imgData[offset + 1] / 255.0;
+    let b = imgData[offset + 2] / 255.0;
+
+    // 修复：实现归一化配置
+    if (normalization === 'imagenet') {
+      r = (r - mean[0]) / std[0];
+      g = (g - mean[1]) / std[1];
+      b = (b - mean[2]) / std[2];
     }
 
-    if (sWidth > 0 && sHeight > 0) {
-      const size = Math.min(sWidth, sHeight);
-      const sx = (sWidth - size) / 2;
-      const sy = (sHeight - size) / 2;
-      ctx.drawImage(source, sx, sy, size, size, 0, 0, targetSize, targetSize);
+    if (c === 3) {
+      float32Data[i * 3] = r;
+      float32Data[i * 3 + 1] = g;
+      float32Data[i * 3 + 2] = b;
     } else {
-      ctx.drawImage(source, 0, 0, targetSize, targetSize);
+      // 灰度图模式：标准加权灰度转换
+      const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+      float32Data[i] = gray;
     }
+  }
 
-    const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
+  const inputName = session.inputNames[0];
+  const tensor = new ort.Tensor('float32', float32Data, [1, c, targetSize, targetSize]);
+  
+  const results = await session.run({ [inputName]: tensor });
+  const outputName = session.outputNames[0];
+  const outputTensor = results[outputName];
+  const outputData = outputTensor.data as Float32Array;
+  const dims = outputTensor.dims; // [1, 11, 2100]
+  const labelsArray = labels.split(',').map(l => l.trim());
+  const numClasses = labelsArray.length;
+  const numPredictions = dims[2];
 
-    // 创建尺寸为 [1, C, H, W] 的浮点数组 (PyTorch 默认格式 nchw)
-    const float32Data = new Float32Array( c * targetSize * targetSize);
+  const confThreshold = 0.25; // 置信度阈值
+  let bestResult = { score: -1, label: '' };
 
-    for (let i = 0; i < targetSize * targetSize; i++) {
+  // 遍历所有锚框
+  for (let i = 0; i < numPredictions; i++) {
+    let maxClassScore = -Infinity;
+    let classId = -1;
 
-      const offset = i * 4;
-
-      float32Data[i*3] = imgData[offset] /255.0;                     // R 通道
-      float32Data[i*3 + 1] = imgData[offset + 1] /255.0;       // G 通道
-      float32Data[i*3 + 2] = imgData[offset + 2] /255.0;   // B 通道
-    }
-    
-    // 动态获取模型输入名称
-    const inputName = session.inputNames[0];
-    const tensor = new ort.Tensor('float32', float32Data, [1, c, targetSize, targetSize]);
-    
-    // 运行推理
-    const results = await session.run({ [inputName]: tensor });
-    const outputName = session.outputNames[0];
-    const outputTensor = results[outputName];
-    const outputData = outputTensor.data as Float32Array;
-    const dims = outputTensor.dims; // [1, 11, 2100]
-    console.log("🔍 模型输出维度 (dims):", dims);
-    console.log("🔍 模型输出数据 (outputData):", outputData);
-    const labelsArray = labels.split(',').map(label => label.trim());
-    const numClasses = labelsArray.length; // 类别数量，应为 7
-    const numPredictions = dims[2];
-
-    let bestResult = { score: -1, label: '' };
-
-    for (let i = 0; i < numPredictions; i++) {
-
-      const objConfIndex = 4 * numPredictions + i;
-      const objConf = outputData[objConfIndex];
-
-    // 过滤掉低置信度的预测框，提升性能
-      if (objConf < 0) continue;
-
-    // 寻找当前框内概率最高的情绪类别
-      let maxClassScore = -1;
-      let classId = -1;
-
-      for (let cIdx = 0; cIdx < numClasses; cIdx++) {
-      // 类别分数从索引 5 开始
-        const classScoreIndex = (5 + cIdx) * numPredictions + i;
-        const score = outputData[classScoreIndex];
-        if (score > maxClassScore) {
-          maxClassScore = score;
-          classId = cIdx;
-        }
-      }
-
-      const finalScore = objConf * maxClassScore;
-
-      if (finalScore > bestResult.score) {
-        bestResult.score = finalScore;
-        bestResult.label = labelsArray[classId];
+    // 修复：类别从第 4 通道开始，索引 4~10 对应 7 个类别
+    for (let cIdx = 0; cIdx < numClasses; cIdx++) {
+      const classScoreIndex = (4 + cIdx) * numPredictions + i;
+      const rawScore = outputData[classScoreIndex];
+      // Sigmoid 激活，将 logits 转为 0~1 概率
+      const score = 1 / (1 + Math.exp(-rawScore));
+      
+      if (score > maxClassScore) {
+        maxClassScore = score;
+        classId = cIdx;
       }
     }
 
-  // --- 4. 返回结果 ---
-  // 设置一个最终置信度阈值，避免误判
-    console.log(`[Debug] Best Result: ${bestResult.label}, Score: ${bestResult.score.toFixed(4)}`);
- 
-    if (bestResult.score > 0) {
-      return `${bestResult.label} (${(bestResult.score * 100).toFixed(1)}%)`;
-    } else {
-      return "未识别出情绪";
+    // 直接用类别最大置信度作为最终分数（无单独 obj_conf）
+    if (maxClassScore > confThreshold && maxClassScore > bestResult.score) {
+      bestResult.score = maxClassScore;
+      bestResult.label = labelsArray[classId];
     }
-  };
+  }
+
+  console.log(`[Debug] Best Result: ${bestResult.label}, Score: ${bestResult.score.toFixed(4)}`);
+
+  if (bestResult.score > confThreshold) {
+    return `${bestResult.label} (${(bestResult.score * 100).toFixed(1)}%)`;
+  } else {
+    return "未识别出情绪";
+  }
+};
   
   const runImagePrediction = async () => {
     if (!session || !imageRef.current) return;
