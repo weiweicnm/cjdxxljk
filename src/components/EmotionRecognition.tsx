@@ -167,8 +167,6 @@ export function EmotionRecognition() {
     for (let i = 0; i < targetSize * targetSize; i++) {
 
       const offset = i * 4;
-      // 1. 转灰度 (模型要求)
-      // 使用加权平均法转换 RGB 为灰度
       const r = imgData[offset];
       const g = imgData[offset + 1];
       const b = imgData[offset + 2];
@@ -189,58 +187,51 @@ export function EmotionRecognition() {
     const results = await session.run(feeds);
     const outputName = session.outputNames[0];
     const outputData = results[outputName].data as Float32Array;
+    const dims = results[outputName].dims;
 
     const labelsArray = labels.split(',').map(label => label.trim());
+    const numClasses = labelsArray.length; // 类别数量，应为 7
+    const numPredictions = dims[2];
 
+    let bestResult = { score: 0, label: '' };
 // 2. 找到置信度最高的类别索引
-    let maxScore = -1;
-    let classId = -1;
-    for (let i = 0; i < outputData.length; i++) {
-      if (outputData[i] > maxScore) {
-        maxScore = outputData[i];
-        classId = i;
+    for (let i = 0; i < numPredictions; i++) {
+    // 获取当前预测框的“物体置信度” (objectness score)
+    // 它在第 4 个位置 (索引为 4)
+      const objConfIndex = 4 * numPredictions + i;
+      const objConf = outputData[objConfIndex];
+
+    // 过滤掉低置信度的预测框，提升性能
+      if (objConf < 0.5) continue;
+
+    // 寻找当前框内概率最高的情绪类别
+      let maxClassScore = -1;
+      let classId = -1;
+      for (let c = 0; c < numClasses; c++) {
+      // 类别分数从索引 5 开始
+        const classScoreIndex = (5 + c) * numPredictions + i;
+        const score = outputData[classScoreIndex];
+        if (score > maxClassScore) {
+          maxClassScore = score;
+          classId = c;
+        }
+      }
+
+    // 最终置信度 = 物体置信度 * 类别置信度
+      const finalScore = objConf * maxClassScore;
+
+      if (finalScore > bestResult.score) {
+        bestResult.score = finalScore;
+        bestResult.label = labelsArray[classId];
       }
     }
 
-// 3. 返回结果
-    if (classId !== -1 && labelsArray[classId]) {
-      return `${labelsArray[classId]} (${(maxScore * 100).toFixed(1)}%)`;
+  // --- 4. 返回结果 ---
+  // 设置一个最终置信度阈值，避免误判
+    if (bestResult.score > 0.6) {
+      return `${bestResult.label} (${(bestResult.score * 100).toFixed(1)}%)`;
     } else {
       return "未识别出情绪";
-    }
-  };
-
-  // --- 辅助函数：计算两个框的 IoU (交并比) ---
-  function calculateIoU(box1: any, box2: any) {
-    const x1 = Math.max(box1.x, box2.x);
-    const y1 = Math.max(box1.y, box2.y);
-    const x2 = Math.min(box1.x + box1.width, box2.x + box2.width);
-    const y2 = Math.min(box1.y + box1.height, box2.y + box2.height);
-
-    const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
-    const area1 = box1.width * box1.height;
-    const area2 = box2.width * box2.height;
-    const union = area1 + area2 - intersection;
-
-    return union === 0 ? 0 : intersection / union;
-  };
-
-  const runImagePrediction = async () => {
-    if (!session || !imageRef.current) return;
-
-    setIsPredicting(true);
-    setErrorMessage('');
-    setPrediction(null);
-
-    try {
-      const result = await performInference(imageRef.current);
-      setPrediction(result);
-    } catch (err: any) {
-      console.error(err);
-      setErrorMessage('预测失败: ' + (err.message || '未知错误'));
-      setModelStatus('error');
-    } finally {
-      setIsPredicting(false);
     }
   };
 
