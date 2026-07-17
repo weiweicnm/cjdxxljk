@@ -167,27 +167,22 @@ export function EmotionRecognition() {
     for (let i = 0; i < targetSize * targetSize; i++) {
 
       const offset = i * 4;
-      const r = imgData[offset];
-      const g = imgData[offset + 1];
-      const b = imgData[offset + 2];
 
-      float32Data[i] = r / 255.0;                     // R 通道
-      float32Data[i + targetSize * targetSize] = g / 255.0;       // G 通道
-      float32Data[i + targetSize * targetSize * 2] = b / 255.0;   // B 通道
+      float32Data[i] = imgData[offset] / 255.0;                     // R 通道
+      float32Data[i + targetSize * targetSize] = imgData[offset + 1] / 255.0;       // G 通道
+      float32Data[i + targetSize * targetSize * 2] = imgData[offset + 2] / 255.0;   // B 通道
     }
     
     // 动态获取模型输入名称
     const inputName = session.inputNames[0];
     const tensor = new ort.Tensor('float32', float32Data, [1, c, targetSize, targetSize]);
     
-    const feeds: Record<string, ort.Tensor> = {};
-    feeds[inputName] = tensor;
-
     // 运行推理
-    const results = await session.run(feeds);
+    const results = await session.run({ [inputName]: tensor });
     const outputName = session.outputNames[0];
-    const outputData = results[outputName].data as Float32Array;
-    const dims = results[outputName].dims;
+    const outputTensor = results[outputName];
+    const outputData = outputTensor.data as Float32Array;
+    const dims = outputTensor.dims; // [1, 11, 2100]
 
     const labelsArray = labels.split(',').map(label => label.trim());
     const numClasses = labelsArray.length; // 类别数量，应为 7
