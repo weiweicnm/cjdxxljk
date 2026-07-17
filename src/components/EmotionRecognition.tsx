@@ -168,9 +168,9 @@ export function EmotionRecognition() {
 
       const offset = i * 4;
 
-      float32Data[i] = imgData[offset] / 255.0;                     // R 通道
-      float32Data[i + targetSize * targetSize] = imgData[offset + 1] / 255.0;       // G 通道
-      float32Data[i + targetSize * targetSize * 2] = imgData[offset + 2] / 255.0;   // B 通道
+      float32Data[i] = imgData[offset];                     // R 通道
+      float32Data[i + targetSize * targetSize] = imgData[offset + 1] ;       // G 通道
+      float32Data[i + targetSize * targetSize * 2] = imgData[offset + 2] ;   // B 通道
     }
     
     // 动态获取模型输入名称
