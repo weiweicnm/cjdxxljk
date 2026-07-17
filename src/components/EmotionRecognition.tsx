@@ -190,81 +190,23 @@ export function EmotionRecognition() {
     const outputName = session.outputNames[0];
     const outputData = results[outputName].data as Float32Array;
 
-    const labels = [
-      '惊讶',     // 0
-      '害怕',     // 1 
-      '厌恶',     // 2 
-      '开心',     // 3 
-      '难过',     // 4 
-      '生气',     // 5 
-      '中性',     // 6 
-    ];
-    const numClasses = labels.length;
-    const numBoxes = 2100;
-    const boxInfo = 4; // x, y, w, h
+    const labelsArray = labels.split(',').map(label => label.trim());
 
-    let detections = [];
-
-    for (let i = 0; i < numBoxes; i++) {
-      // 提取类别置信度，找到最大值
-      let maxClassScore = -1;
-      let classId = -1;
-      for (let c = 0; c < numClasses; c++) {
-        const score = outputData[i * (boxInfo + numClasses) + boxInfo + c];
-        if (score > maxClassScore) {
-          maxClassScore = score;
-          classId = c;
-        }
-      }
-
-      // 过滤掉低置信度的预测 (阈值可调)
-      if (maxClassScore > 0.25) {
-        // 提取边界框信息 (中心点x, 中心点y, 宽, 高)
-        // 注意：YOLO输出是归一化的，需要乘以图像尺寸
-        const cx = outputData[i * (boxInfo + numClasses) + 0] * targetSize;
-        const cy = outputData[i * (boxInfo + numClasses) + 1] * targetSize;
-        const w = outputData[i * (boxInfo + numClasses) + 2] * targetSize;
-        const h = outputData[i * (boxInfo + numClasses) + 3] * targetSize;
-
-        detections.push({
-          x: cx - w / 2, // 转换为左上角坐标
-          y: cy - h / 2,
-          width: w,
-          height: h,
-          score: maxClassScore,
-          classId: classId,
-          label: labels[classId]
-        });
+// 2. 找到置信度最高的类别索引
+    let maxScore = -1;
+    let classId = -1;
+    for (let i = 0; i < outputData.length; i++) {
+      if (outputData[i] > maxScore) {
+        maxScore = outputData[i];
+        classId = i;
       }
     }
 
-    // 6. 非极大值抑制 (NMS) - 去除重叠的框
-    if (detections.length === 0) {
-      return "未检测到人脸";
-    }
-
-    // 按置信度从高到低排序
-    detections.sort((a, b) => b.score - a.score);
-
-    const nmsThreshold = 0.45; // IoU 阈值
-    const finalDetections = [];
-
-    while (detections.length > 0) {
-      const current = detections.shift()!;
-      finalDetections.push(current);
-
-      detections = detections.filter(other => {
-        const iou = calculateIoU(current, other);
-        return iou < nmsThreshold;
-      });
-    }
-
-    // 7. 返回结果 (返回置信度最高的那个)
-    if (finalDetections.length > 0) {
-      const best = finalDetections[0];
-      return `${best.label} (${(best.score * 100).toFixed(1)}%)`;
+// 3. 返回结果
+    if (classId !== -1 && labelsArray[classId]) {
+      return `${labelsArray[classId]} (${(maxScore * 100).toFixed(1)}%)`;
     } else {
-      return "未检测到人脸";
+      return "未识别出情绪";
     }
   };
 
