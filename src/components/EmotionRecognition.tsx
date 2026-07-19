@@ -120,7 +120,7 @@ export function EmotionRecognition() {
     reader.readAsDataURL(file);
   };
 
-// ========== 核心推理函数（适配你的7类情绪YOLOv8 ONNX模型） ==========
+// ========== 核心推理函数（修正张量索引，适配YOLOv8输出[1,11,2100]） ==========
 const performInference = async (source: CanvasImageSource): Promise<string> => {
   if (!session) throw new Error("模型未加载");
 
@@ -243,6 +243,25 @@ const performInference = async (source: CanvasImageSource): Promise<string> => {
     return "未识别出情绪";
   }
 };
+
+  const runImagePrediction = async () => {
+    if (!session || !imageRef.current) return;
+
+    setIsPredicting(true);
+    setErrorMessage('');
+    setPrediction(null);
+
+    try {
+      const result = await performInference(imageRef.current);
+      setPrediction(result);
+    } catch (err: any) {
+      console.error(err);
+      setErrorMessage('预测失败: ' + (err.message || '未知错误'));
+      setModelStatus('error');
+    } finally {
+      setIsPredicting(false);
+    }
+  };
 
   const startCamera = async () => {
     setErrorMessage('');
