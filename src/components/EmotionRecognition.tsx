@@ -120,28 +120,59 @@ export function EmotionRecognition() {
     reader.readAsDataURL(file);
   };
 
-// ========== 核心推理函数（修正张量索引，适配YOLOv8输出[1,11,2100]） ==========
+// ========== YOLOv8 表情检测推理函数（适配输出 [1, 11, 2100]） ==========
+interface Detection {
+  label: string;
+  score: number;
+  box: {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    cx: number;
+    cy: number;
+    w: number;
+    h: number;
+  };
+  originalBox: {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    cx: number;
+    cy: number;
+    width: number;
+    height: number;
+  };
+}
+
 const performInference = async (source: CanvasImageSource): Promise<string> => {
   if (!session) throw new Error("模型未加载");
 
-  const targetSize = Number(inputSize);
-  const channelNum = Number(channels);
+  const targetSize = Number(inputSize); // 输入尺寸 320
+  const channelNum = Number(channels); // 通道数 3
+  const labelsArray = labels.split(',').map(label => label.trim());
+  const numClasses = labelsArray.length; // 类别数 7
+  const confThreshold = 0.25;
+  const iouThreshold = 0.45;
 
+  // ========== 1. 图像预处理：Letterbox 等比例缩放 + 居中填充 ==========
   const canvas = document.createElement('canvas');
   canvas.width = targetSize;
   canvas.height = targetSize;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error("无法创建画布处理图像");
 
-  // 获取源图像尺寸
-  let sWidth = typeof source.width === 'number' ? source.width : 0;
-  let sHeight = typeof source.height === 'number' ? source.height : 0;
+  // 获取源图像真实尺寸
+  let sWidth = 0, sHeight = 0;
   if (source instanceof HTMLVideoElement) {
     sWidth = source.videoWidth;
     sHeight = source.videoHeight;
+  } else if (typeof source.width === 'number' && typeof source.height === 'number') {
+    sWidth = source.width;
+    sHeight = source.height;
   }
 
-  // 标准 Letterbox 缩放 + YOLO官方填充色114
   let ratio = 1, padX = 0, padY = 0;
   if (sWidth > 0 && sHeight > 0) {
     ratio = Math.min(targetSize / sWidth, targetSize / sHeight);
@@ -150,6 +181,7 @@ const performInference = async (source: CanvasImageSource): Promise<string> => {
     padX = (targetSize - newW) / 2;
     padY = (targetSize - newH) / 2;
 
+    // 填充灰色背景，与YOLO训练预处理逻辑一致
     ctx.fillStyle = 'rgb(114, 114, 114)';
     ctx.fillRect(0, 0, targetSize, targetSize);
     ctx.drawImage(source, padX, padY, newW, newH);
@@ -157,86 +189,101 @@ const performInference = async (source: CanvasImageSource): Promise<string> => {
     ctx.drawImage(source, 0, 0, targetSize, targetSize);
   }
 
-  // 构建 NCHW 格式输入张量，仅除以255匹配Ultralytics训练预处理
+  // ========== 2. 像素转 CHW 浮点张量 ==========
   const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
-  const float32Data = new Float32Array(channelNum * targetSize * targetSize);
+  const totalPixels = targetSize * targetSize;
+  const float32Data = new Float32Array(channelNum * totalPixels);
 
-  for (let i = 0; i < targetSize * targetSize; i++) {
-    const offset = i * 4;
-    const r = imgData[offset] / 255.0;
-    const g = imgData[offset + 1] / 255.0;
-    const b = imgData[offset + 2] / 255.0;
+  for (let i = 0; i < totalPixels; i++) {
+    const pixelOffset = i * 4;
+    // 像素归一化到 0~1，按 CHW 通道优先布局排列
+    const r = imgData[pixelOffset + 0] / 255.0;
+    const g = imgData[pixelOffset + 1] / 255.0;
+    const b = imgData[pixelOffset + 2] / 255.0;
 
-    float32Data[i * 3]     = r;
-    float32Data[i * 3 + 1] = g;
-    float32Data[i * 3 + 2] = b;
+    float32Data[i] = r;                  // R 通道（前 totalPixels 个元素）
+    float32Data[i + totalPixels] = g;    // G 通道
+    float32Data[i + totalPixels * 2] = b;// B 通道
   }
 
-  // 运行推理
+  // ========== 3. 模型推理 ==========
   const inputName = session.inputNames[0];
-  const tensor = new ort.Tensor('float32', float32Data, [1, channelNum, targetSize, targetSize]);
-  const results = await session.run({ [inputName]: tensor });
+  const inputTensor = new ort.Tensor('float32', float32Data, [1, channelNum, targetSize, targetSize]);
+  const results = await session.run({ [inputName]: inputTensor });
   
   const outputName = session.outputNames[0];
   const outputTensor = results[outputName];
   const outputData = outputTensor.data as Float32Array;
   const dims = outputTensor.dims; // [1, 11, 2100]
-  
-  const labelsArray = labels.split(',').map(label => label.trim());
-  const numClasses = labelsArray.length;
-  const numPredictions = dims[2];
-  const confThreshold = 0.25;
-  
-  const detections: any[] = [];
+  const numPredictions = dims[2]; // 总预测点数量 2100
 
-  // 修正索引：单条预测占用11个数值，排布 i*11 + 通道下标
+  // ========== 4. 解析输出（核心修正：通道优先内存索引） ==========
+  // 张量布局：[batch=1, channels=11, num_points=2100]
+  // 通道定义：0-cx, 1-cy, 2-w, 3-h, 4~10 → 7类表情概率（已内置Sigmoid）
+  const detections: Detection[] = [];
+
   for (let i = 0; i < numPredictions; i++) {
-    let maxClassScore = -Infinity;
+    // 正确索引公式：通道号 * 总预测点数 + 当前点索引
+    const cx = outputData[0 * numPredictions + i];
+    const cy = outputData[1 * numPredictions + i];
+    const w  = outputData[2 * numPredictions + i];
+    const h  = outputData[3 * numPredictions + i];
+
+    // 遍历类别，取置信度最高的分类
+    let maxScore = -Infinity;
     let classId = -1;
-
-    for (let cIdx = 0; cIdx < numClasses; cIdx++) {
-      const rawLogit = outputData[i * 11 + (4 + cIdx)];
-      const score = 1 / (1 + Math.exp(-rawLogit));
-
-      if (score > maxClassScore) {
-        maxClassScore = score;
-        classId = cIdx;
+    for (let c = 0; c < numClasses; c++) {
+      const score = outputData[(4 + c) * numPredictions + i];
+      if (score > maxScore) {
+        maxScore = score;
+        classId = c;
       }
     }
 
-    if (maxClassScore > confThreshold) {
-      const cx = outputData[i * 11 + 0];
-      const cy = outputData[i * 11 + 1];
-      const w  = outputData[i * 11 + 2];
-      const h  = outputData[i * 11 + 3];
+    if (maxScore > confThreshold) {
+      // 输入图下的像素坐标（对应 320x320 尺寸）
+      const x1 = cx - w / 2;
+      const y1 = cy - h / 2;
+      const x2 = cx + w / 2;
+      const y2 = cy + h / 2;
 
-      // 坐标还原原图
-      const xCenterNoPad = cx - padX;
-      const yCenterNoPad = cy - padY;
-      const originalCx = xCenterNoPad / ratio;
-      const originalCy = yCenterNoPad / ratio;
-      const originalW = w / ratio;
-      const originalH = h / ratio;
+      // 还原到原图坐标：去除填充 + 缩放还原，同时做边界校验
+      const origX1 = Math.max(0, (x1 - padX) / ratio);
+      const origY1 = Math.max(0, (y1 - padY) / ratio);
+      const origX2 = Math.min(sWidth, (x2 - padX) / ratio);
+      const origY2 = Math.min(sHeight, (y2 - padY) / ratio);
+      const origCx = (origX1 + origX2) / 2;
+      const origCy = (origY1 + origY2) / 2;
+      const origW = origX2 - origX1;
+      const origH = origY2 - origY1;
 
       detections.push({
         label: labelsArray[classId],
-        score: maxClassScore,
-        box: { cx, cy, w, h },
+        score: maxScore,
+        box: { x1, y1, x2, y2, cx, cy, w, h },
         originalBox: {
-          cx: originalCx,
-          cy: originalCy,
-          width: originalW,
-          height: originalH
+          x1: origX1,
+          y1: origY1,
+          x2: origX2,
+          y2: origY2,
+          cx: origCx,
+          cy: origCy,
+          width: origW,
+          height: origH
         }
       });
     }
   }
 
-  // 按置信度降序取最优结果
-  detections.sort((a, b) => b.score - a.score);
-  
-  if (detections.length > 0) {
-    const best = detections[0];
+  // ========== 5. NMS 非极大值抑制（去除重复检测框） ==========
+  const nmsDetections = nms(detections, iouThreshold);
+
+  // 按置信度降序排序
+  nmsDetections.sort((a, b) => b.score - a.score);
+
+  // ========== 6. 返回结果 ==========
+  if (nmsDetections.length > 0) {
+    const best = nmsDetections[0];
     console.log(`[Debug] Best Result: ${best.label}, Score: ${(best.score * 100).toFixed(1)}%`);
     return `${best.label} (${(best.score * 100).toFixed(1)}%)`;
   } else {
@@ -244,6 +291,43 @@ const performInference = async (source: CanvasImageSource): Promise<string> => {
   }
 };
 
+// ========== 辅助函数：NMS 非极大值抑制 ==========
+const nms = (detections: Detection[], iouThreshold: number): Detection[] => {
+  if (detections.length === 0) return [];
+  
+  const result: Detection[] = [];
+  const sorted = [...detections].sort((a, b) => b.score - a.score);
+  
+  while (sorted.length > 0) {
+    const current = sorted.shift()!;
+    result.push(current);
+    
+    // 移除与当前框IOU超过阈值的重复框
+    for (let i = sorted.length - 1; i >= 0; i--) {
+      const iou = calculateIoU(current.originalBox, sorted[i].originalBox);
+      if (iou > iouThreshold) {
+        sorted.splice(i, 1);
+      }
+    }
+  }
+  
+  return result;
+};
+
+// ========== 辅助函数：计算交并比 IOU ==========
+const calculateIoU = (boxA: any, boxB: any): number => {
+  const x1 = Math.max(boxA.x1, boxB.x1);
+  const y1 = Math.max(boxA.y1, boxB.y1);
+  const x2 = Math.min(boxA.x2, boxB.x2);
+  const y2 = Math.min(boxA.y2, boxB.y2);
+  
+  const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const areaA = (boxA.x2 - boxA.x1) * (boxA.y2 - boxA.y1);
+  const areaB = (boxB.x2 - boxB.x1) * (boxB.y2 - boxB.y1);
+  const union = areaA + areaB - intersection;
+  
+  return union > 0 ? intersection / union : 0;
+};
   const runImagePrediction = async () => {
     if (!session || !imageRef.current) return;
 
