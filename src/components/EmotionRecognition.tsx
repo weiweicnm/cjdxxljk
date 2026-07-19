@@ -120,28 +120,28 @@ export function EmotionRecognition() {
     reader.readAsDataURL(file);
   };
 
-  // ========== 核心推理函数 ==========
-  const performInference = async (source: CanvasImageSource): Promise<string> => {
-    if (!session) throw new Error("模型未加载");
+// ========== 核心推理函数（适配你的7类情绪YOLOv8 ONNX模型） ==========
+const performInference = async (source: CanvasImageSource): Promise<string> => {
+  if (!session) throw new Error("模型未加载");
 
-    const targetSize = Number(inputSize);
-    const channelNum = Number(channels);
+  const targetSize = Number(inputSize); // 你的模型固定320
+  const channelNum = Number(channels); // 固定3
 
-    const canvas = document.createElement('canvas');
-    canvas.width = targetSize;
-    canvas.height = targetSize;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error("无法创建画布处理图像");
+  const canvas = document.createElement('canvas');
+  canvas.width = targetSize;
+  canvas.height = targetSize;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error("无法创建画布处理图像");
 
-    // 获取源图像尺寸
-    let sWidth = typeof source.width === 'number' ? source.width : 0;
+  // 获取源图像尺寸
+  let sWidth = typeof source.width === 'number' ? source.width : 0;
   let sHeight = typeof source.height === 'number' ? source.height : 0;
   if (source instanceof HTMLVideoElement) {
     sWidth = source.videoWidth;
     sHeight = source.videoHeight;
   }
 
-  // 标准 Letterbox 缩放 + 官方填充色 114
+  // 标准 Letterbox 缩放 + YOLO官方填充色114
   let ratio = 1, padX = 0, padY = 0;
   if (sWidth > 0 && sHeight > 0) {
     ratio = Math.min(targetSize / sWidth, targetSize / sHeight);
@@ -157,61 +157,48 @@ export function EmotionRecognition() {
     ctx.drawImage(source, 0, 0, targetSize, targetSize);
   }
 
-  // 2. 构建 NCHW 格式输入张量
-    const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
-    const float32Data = new Float32Array(channelNum * targetSize * targetSize);
-    const meanRGB = [0.485, 0.456, 0.406];
-    const stdRGB = [0.229, 0.224, 0.225];
+  // 2. 构建 NCHW 格式输入张量（强制适配Ultralytics：仅除以255，禁用imagenet归一化）
+  const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
+  const float32Data = new Float32Array(channelNum * targetSize * targetSize);
 
-    for (let i = 0; i < targetSize * targetSize; i++) {
-      const offset = i * 4;
-      const r = imgData[offset] / 255.0;
-      const g = imgData[offset + 1] / 255.0;
-      const b = imgData[offset + 2] / 255.0;
+  for (let i = 0; i < targetSize * targetSize; i++) {
+    const offset = i * 4;
+    const r = imgData[offset] / 255.0;
+    const g = imgData[offset + 1] / 255.0;
+    const b = imgData[offset + 2] / 255.0;
 
-      if (channelNum === 3) {
-        if (normalization === 'imagenet') {
-          float32Data[i * 3]     = (r - meanRGB) / stdRGB;
-          float32Data[i * 3 + 1] = (g - meanRGB) / stdRGB;
-          float32Data[i * 3 + 2] = (b - meanRGB) / stdRGB;
-        } else {
-          // 默认仅除以 255，与 Ultralytics 训练一致
-          float32Data[i * 3]     = r;
-          float32Data[i * 3 + 1] = g;
-          float32Data[i * 3 + 2] = b;
-        }
-      } else {
-        float32Data[i] = 0.299 * r + 0.587 * g + 0.114 * b;
-      }
-    }
+    // 你的模型训练预处理只用除以255，强制走默认分支，规避imagenet归一化造成精度暴跌
+    float32Data[i * 3]     = r;
+    float32Data[i * 3 + 1] = g;
+    float32Data[i * 3 + 2] = b;
+  }
 
   // 3. 运行推理
-  const inputName = session.inputNames;
+  const inputName = session.inputNames[0];
   const tensor = new ort.Tensor('float32', float32Data, [1, channelNum, targetSize, targetSize]);
   const results = await session.run({ [inputName]: tensor });
   
-  const outputName = session.outputNames;
+  const outputName = session.outputNames[0];
   const outputTensor = results[outputName];
   const outputData = outputTensor.data as Float32Array;
-  const dims = outputTensor.dims; // 
+  const dims = outputTensor.dims; // [1, 11, 2100]
   
   const labelsArray = labels.split(',').map(label => label.trim());
   const numClasses = labelsArray.length; // 7
-  const numPredictions = dims;        // 2100
+  const numPredictions = dims[2]; // 修复：预测框总数=2100，原代码此处严重错误
   const confThreshold = 0.25;
   
-  const detections: any[] = [];<websource>source_group_web_3</websource>
+  const detections: any[] = [];
 
-  // 4. 标准 YOLO 后处理 + Sigmoid 激活
+  // 4. 标准 YOLOv8 后处理 + Sigmoid 激活（适配[1, 4+nc, N]输出布局）
   for (let i = 0; i < numPredictions; i++) {
     let maxClassScore = -Infinity;
     let classId = -1;
 
-    // 遍历 7 个情绪类别
+    // 遍历7个情绪类别计算sigmoid置信度
     for (let cIdx = 0; cIdx < numClasses; cIdx++) {
-      // YOLOv8 输出布局: [1, 4+nc, num_preds]
+      // 第4+cIdx个通道的logit，对应第i个预测点
       const rawLogit = outputData[(4 + cIdx) * numPredictions + i];
-      // Sigmoid 激活
       const score = 1 / (1 + Math.exp(-rawLogit));
 
       if (score > maxClassScore) {
@@ -220,41 +207,46 @@ export function EmotionRecognition() {
       }
     }
 
-    // 收集所有满足置信度阈值的预测框
     if (maxClassScore > confThreshold) {
-      // 提取边界框坐标 (cx, cy, w, h)
+      // 提取归一化到320画布的cx cy w h
       const cx = outputData[0 * numPredictions + i];
       const cy = outputData[1 * numPredictions + i];
       const w  = outputData[2 * numPredictions + i];
       const h  = outputData[3 * numPredictions + i];
 
+      // 坐标还原到原图坐标系（letterbox反向映射）
+      const xCenterNoPad = cx - padX;
+      const yCenterNoPad = cy - padY;
+      const originalCx = xCenterNoPad / ratio;
+      const originalCy = yCenterNoPad / ratio;
+      const originalW = w / ratio;
+      const originalH = h / ratio;
+
       detections.push({
         label: labelsArray[classId],
         score: maxClassScore,
         box: { cx, cy, w, h },
-        // 可选：在这里将缩放后的坐标还原到原图尺寸
-        // originalBox: {
-        //   x: (cx - w / 2 - padX) / ratio,
-        //   y: (cy - h / 2 - padY) / ratio,
-        //   width: w / ratio,
-        //   height: h / ratio
-        // }
+        originalBox: {
+          cx: originalCx,
+          cy: originalCy,
+          width: originalW,
+          height: originalH
+        }
       });
     }
   }
 
-  // 5. 简单 NMS (非极大值抑制) 或 直接返回最高分
-  // 这里为了简单演示，按分数降序排序并返回第一个（你也可以接入完整的 NMS 算法）
+  // 5. NMS简化：按置信度降序，取最高置信度单框输出；如需完整NMS可再加算法
   detections.sort((a, b) => b.score - a.score);
   
   if (detections.length > 0) {
-    const best = detections;
+    const best = detections[0]; // 修复原代码bug：原直接传数组，现在取第一条最高分结果
     console.log(`[Debug] Best Result: ${best.label}, Score: ${(best.score * 100).toFixed(1)}%`);
     return `${best.label} (${(best.score * 100).toFixed(1)}%)`;
   } else {
     return "未识别出情绪";
   }
-  };
+};
   
   const runImagePrediction = async () => {
     if (!session || !imageRef.current) return;
