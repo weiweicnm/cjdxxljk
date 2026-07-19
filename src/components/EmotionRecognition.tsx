@@ -120,136 +120,149 @@ export function EmotionRecognition() {
     reader.readAsDataURL(file);
   };
 
-  // ========== 核心推理函数 - 已全部对齐 Ultralytics 标准 ==========
+  // ========== 核心推理函数 ==========
   const performInference = async (source: CanvasImageSource): Promise<string> => {
     if (!session) throw new Error("模型未加载");
 
-    const targetSize = Number(inputSize);
-    const channelNum = Number(channels);
+    const preprocessAndPredict = async (
+  session: ort.InferenceSession, 
+  source: HTMLImageElement | HTMLVideoElement, 
+  inputSize: number, 
+  channels: number, 
+  labels: string, 
+  normalization?: string
+) => {
+  const targetSize = Number(inputSize);
+  const channelNum = Number(channels);
 
-    const canvas = document.createElement('canvas');
-    canvas.width = targetSize;
-    canvas.height = targetSize;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error("无法创建画布处理图像");
+  // 1. 图像预处理：Letterbox + 填充
+  const canvas = document.createElement('canvas');
+  canvas.width = targetSize;
+  canvas.height = targetSize;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error("无法创建画布处理图像");
 
-    // 获取源图像尺寸
-    let sWidth = typeof source.width === 'number' ? source.width : 0;
-    let sHeight = typeof source.height === 'number' ? source.height : 0;
-    if (source instanceof HTMLVideoElement) {
-      sWidth = source.videoWidth;
-      sHeight = source.videoHeight;
-    }
+  let sWidth = typeof source.width === 'number' ? source.width : 0;
+  let sHeight = typeof source.height === 'number' ? source.height : 0;
+  if (source instanceof HTMLVideoElement) {
+    sWidth = source.videoWidth;
+    sHeight = source.videoHeight;
+  }
 
-    // ===== 修复1：标准 Letterbox 缩放 + 官方填充色 114 =====
-    if (sWidth > 0 && sHeight > 0) {
-      const ratio = Math.min(targetSize / sWidth, targetSize / sHeight);
-      const newW = Math.round(sWidth * ratio);
-      const newH = Math.round(sHeight * ratio);
-      const padX = (targetSize - newW) / 2;
-      const padY = (targetSize - newH) / 2;
+  // 标准 Letterbox 缩放 + 官方填充色 114
+  let ratio = 1, padX = 0, padY = 0;
+  if (sWidth > 0 && sHeight > 0) {
+    ratio = Math.min(targetSize / sWidth, targetSize / sHeight);
+    const newW = Math.round(sWidth * ratio);
+    const newH = Math.round(sHeight * ratio);
+    padX = (targetSize - newW) / 2;
+    padY = (targetSize - newH) / 2;
 
-      // Ultralytics 默认填充灰度值 114
-      ctx.fillStyle = 'rgb(114, 114, 114)';
-      ctx.fillRect(0, 0, targetSize, targetSize);
-      ctx.drawImage(source, padX, padY, newW, newH);
-    } else {
-      ctx.drawImage(source, 0, 0, targetSize, targetSize);
-    }
+    ctx.fillStyle = 'rgb(114, 114, 114)';
+    ctx.fillRect(0, 0, targetSize, targetSize);
+    ctx.drawImage(source, padX, padY, newW, newH);
+  } else {
+    ctx.drawImage(source, 0, 0, targetSize, targetSize);
+  }
 
-    const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
-    const float32Data = new Float32Array(channelNum * targetSize * targetSize);
+  // 2. 构建 NCHW 格式输入张量
+  const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
+  const float32Data = new Float32Array(channelNum * targetSize * targetSize);
+  const meanRGB = [0.485, 0.456, 0.406];
+  const stdRGB = [0.229, 0.224, 0.225];
 
-    // ImageNet 标准化参数 (RGB 顺序)
-    const meanRGB = [0.485, 0.456, 0.406];
-    const stdRGB = [0.229, 0.224, 0.225];
+  for (let i = 0; i < targetSize * targetSize; i++) {
+    const offset = i * 4;
+    const r = imgData[offset] / 255.0;
+    const g = imgData[offset + 1] / 255.0;
+    const b = imgData[offset + 2] / 255.0;
 
-    // ===== 修复2：RGB 通道顺序（与 PyTorch 训练输入一致） =====
-    for (let i = 0; i < targetSize * targetSize; i++) {
-      const offset = i * 4;
-      const r = imgData[offset] / 255.0;
-      const g = imgData[offset + 1] / 255.0;
-      const b = imgData[offset + 2] / 255.0;
-
-      if (channelNum === 3) {
-        if (normalization === 'imagenet') {
-          float32Data[i * 3]     = (r - meanRGB[0]) / stdRGB[0];
-          float32Data[i * 3 + 1] = (g - meanRGB[1]) / stdRGB[1];
-          float32Data[i * 3 + 2] = (b - meanRGB[2]) / stdRGB[2];
-        } else {
-          // 默认：仅除以 255，与 Ultralytics 训练一致
-          float32Data[i * 3]     = r;
-          float32Data[i * 3 + 1] = g;
-          float32Data[i * 3 + 2] = b;
-        }
+    if (channelNum === 3) {
+      if (normalization === 'imagenet') {
+        float32Data[i * 3]     = (r - meanRGB) / stdRGB;
+        float32Data[i * 3 + 1] = (g - meanRGB) / stdRGB;
+        float32Data[i * 3 + 2] = (b - meanRGB) / stdRGB;
       } else {
-        const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-        float32Data[i] = gray;
+        // 默认仅除以 255，与 Ultralytics 训练一致
+        float32Data[i * 3]     = r;
+        float32Data[i * 3 + 1] = g;
+        float32Data[i * 3 + 2] = b;
+      }
+    } else {
+      float32Data[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+    }
+  }<websource>source_group_web_2</websource>
+
+  // 3. 运行推理
+  const inputName = session.inputNames;
+  const tensor = new ort.Tensor('float32', float32Data, [1, channelNum, targetSize, targetSize]);
+  const results = await session.run({ [inputName]: tensor });
+  
+  const outputName = session.outputNames;
+  const outputTensor = results[outputName];
+  const outputData = outputTensor.data as Float32Array;
+  const dims = outputTensor.dims; // 
+  
+  const labelsArray = labels.split(',').map(label => label.trim());
+  const numClasses = labelsArray.length; // 7
+  const numPredictions = dims;        // 2100
+  const confThreshold = 0.25;
+  
+  const detections: any[] = [];<websource>source_group_web_3</websource>
+
+  // 4. 标准 YOLO 后处理 + Sigmoid 激活
+  for (let i = 0; i < numPredictions; i++) {
+    let maxClassScore = -Infinity;
+    let classId = -1;
+
+    // 遍历 7 个情绪类别
+    for (let cIdx = 0; cIdx < numClasses; cIdx++) {
+      // YOLOv8 输出布局: [1, 4+nc, num_preds]
+      const rawLogit = outputData[(4 + cIdx) * numPredictions + i];
+      // Sigmoid 激活
+      const score = 1 / (1 + Math.exp(-rawLogit));
+
+      if (score > maxClassScore) {
+        maxClassScore = score;
+        classId = cIdx;
       }
     }
 
-    // 构建 NCHW 格式输入张量
-    const inputName = session.inputNames[0];
-    const tensor = new ort.Tensor('float32', float32Data, [1, channelNum, targetSize, targetSize]);
-    
-    // 运行推理
-    const results = await session.run({ [inputName]: tensor });
-    const outputName = session.outputNames[0];
-    const outputTensor = results[outputName];
-    const outputData = outputTensor.data as Float32Array;
-    const dims = outputTensor.dims; // [1, 11, 2100]
-    const labelsArray = labels.split(',').map(label => label.trim());
-    const numClasses = labelsArray.length;
-    const numPredictions = dims[2];
+    // 收集所有满足置信度阈值的预测框
+    if (maxClassScore > confThreshold) {
+      // 提取边界框坐标 (cx, cy, w, h)
+      const cx = outputData[0 * numPredictions + i];
+      const cy = outputData[1 * numPredictions + i];
+      const w  = outputData[2 * numPredictions + i];
+      const h  = outputData[3 * numPredictions + i];
 
-    const confThreshold = 0.25;
-    let bestResult = { score: -1, label: '', boxIndex: -1 };
-
-    // ===== 修复3：标准 YOLO 后处理 + Sigmoid 激活 =====
-    // 输出格式：[1, 4 + numClasses, numPredictions]
-    // 0~3: 边界框坐标，4~10: 7类情绪 logits
-    for (let i = 0; i < numPredictions; i++) {
-      let maxClassScore = -Infinity;
-      let classId = -1;
-
-      // 遍历7个情绪类别
-      for (let cIdx = 0; cIdx < numClasses; cIdx++) {
-        const classScoreIndex = (4 + cIdx) * numPredictions + i;
-        const rawLogit = outputData[classScoreIndex];
-        // Sigmoid 激活：将 logits 转为 0~1 概率
-        const score = 1 / (1 + Math.exp(-rawLogit));
-
-        if (score > maxClassScore) {
-          maxClassScore = score;
-          classId = cIdx;
-        }
-      }
-
-      // 只保留置信度达标的锚框，过滤背景干扰
-      if (maxClassScore > confThreshold && maxClassScore > bestResult.score) {
-        bestResult.score = maxClassScore;
-        bestResult.label = labelsArray[classId];
-        bestResult.boxIndex = i;
-      }
-    }
-
-    // 调试日志：打印最优结果的各类别详细分数
-    if (bestResult.boxIndex >= 0) {
-      console.log("=== 最优锚框各类别分数 ===");
-      labelsArray.forEach((label, idx) => {
-        const raw = outputData[(4 + idx) * numPredictions + bestResult.boxIndex];
-        const prob = 1 / (1 + Math.exp(-raw));
-        console.log(`${label}: ${prob.toFixed(4)} (raw: ${raw.toFixed(2)})`);
+      detections.push({
+        label: labelsArray[classId],
+        score: maxClassScore,
+        box: { cx, cy, w, h },
+        // 可选：在这里将缩放后的坐标还原到原图尺寸
+        // originalBox: {
+        //   x: (cx - w / 2 - padX) / ratio,
+        //   y: (cy - h / 2 - padY) / ratio,
+        //   width: w / ratio,
+        //   height: h / ratio
+        // }
       });
     }
-    console.log(`[Debug] Best Result: ${bestResult.label}, Score: ${bestResult.score.toFixed(4)}`);
+  }
 
-    if (bestResult.score > confThreshold) {
-      return `${bestResult.label} (${(bestResult.score * 100).toFixed(1)}%)`;
-    } else {
-      return "未识别出情绪";
-    }
-  };
+  // 5. 简单 NMS (非极大值抑制) 或 直接返回最高分
+  // 这里为了简单演示，按分数降序排序并返回第一个（你也可以接入完整的 NMS 算法）
+  detections.sort((a, b) => b.score - a.score);
+  
+  if (detections.length > 0) {
+    const best = detections;
+    console.log(`[Debug] Best Result: ${best.label}, Score: ${(best.score * 100).toFixed(1)}%`);
+    return `${best.label} (${(best.score * 100).toFixed(1)}%)`;
+  } else {
+    return "未识别出情绪";
+  }
+};
   
   const runImagePrediction = async () => {
     if (!session || !imageRef.current) return;
