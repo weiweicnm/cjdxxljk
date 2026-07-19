@@ -124,25 +124,17 @@ export function EmotionRecognition() {
   const performInference = async (source: CanvasImageSource): Promise<string> => {
     if (!session) throw new Error("模型未加载");
 
-    const preprocessAndPredict = async (
-  session: ort.InferenceSession, 
-  source: HTMLImageElement | HTMLVideoElement, 
-  inputSize: number, 
-  channels: number, 
-  labels: string, 
-  normalization?: string
-) => {
-  const targetSize = Number(inputSize);
-  const channelNum = Number(channels);
+    const targetSize = Number(inputSize);
+    const channelNum = Number(channels);
 
-  // 1. 图像预处理：Letterbox + 填充
-  const canvas = document.createElement('canvas');
-  canvas.width = targetSize;
-  canvas.height = targetSize;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error("无法创建画布处理图像");
+    const canvas = document.createElement('canvas');
+    canvas.width = targetSize;
+    canvas.height = targetSize;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error("无法创建画布处理图像");
 
-  let sWidth = typeof source.width === 'number' ? source.width : 0;
+    // 获取源图像尺寸
+    let sWidth = typeof source.width === 'number' ? source.width : 0;
   let sHeight = typeof source.height === 'number' ? source.height : 0;
   if (source instanceof HTMLVideoElement) {
     sWidth = source.videoWidth;
@@ -166,32 +158,32 @@ export function EmotionRecognition() {
   }
 
   // 2. 构建 NCHW 格式输入张量
-  const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
-  const float32Data = new Float32Array(channelNum * targetSize * targetSize);
-  const meanRGB = [0.485, 0.456, 0.406];
-  const stdRGB = [0.229, 0.224, 0.225];
+    const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
+    const float32Data = new Float32Array(channelNum * targetSize * targetSize);
+    const meanRGB = [0.485, 0.456, 0.406];
+    const stdRGB = [0.229, 0.224, 0.225];
 
-  for (let i = 0; i < targetSize * targetSize; i++) {
-    const offset = i * 4;
-    const r = imgData[offset] / 255.0;
-    const g = imgData[offset + 1] / 255.0;
-    const b = imgData[offset + 2] / 255.0;
+    for (let i = 0; i < targetSize * targetSize; i++) {
+      const offset = i * 4;
+      const r = imgData[offset] / 255.0;
+      const g = imgData[offset + 1] / 255.0;
+      const b = imgData[offset + 2] / 255.0;
 
-    if (channelNum === 3) {
-      if (normalization === 'imagenet') {
-        float32Data[i * 3]     = (r - meanRGB) / stdRGB;
-        float32Data[i * 3 + 1] = (g - meanRGB) / stdRGB;
-        float32Data[i * 3 + 2] = (b - meanRGB) / stdRGB;
+      if (channelNum === 3) {
+        if (normalization === 'imagenet') {
+          float32Data[i * 3]     = (r - meanRGB) / stdRGB;
+          float32Data[i * 3 + 1] = (g - meanRGB) / stdRGB;
+          float32Data[i * 3 + 2] = (b - meanRGB) / stdRGB;
+        } else {
+          // 默认仅除以 255，与 Ultralytics 训练一致
+          float32Data[i * 3]     = r;
+          float32Data[i * 3 + 1] = g;
+          float32Data[i * 3 + 2] = b;
+        }
       } else {
-        // 默认仅除以 255，与 Ultralytics 训练一致
-        float32Data[i * 3]     = r;
-        float32Data[i * 3 + 1] = g;
-        float32Data[i * 3 + 2] = b;
+        float32Data[i] = 0.299 * r + 0.587 * g + 0.114 * b;
       }
-    } else {
-      float32Data[i] = 0.299 * r + 0.587 * g + 0.114 * b;
     }
-  }<websource>source_group_web_2</websource>
 
   // 3. 运行推理
   const inputName = session.inputNames;
@@ -262,7 +254,7 @@ export function EmotionRecognition() {
   } else {
     return "未识别出情绪";
   }
-};
+  };
   
   const runImagePrediction = async () => {
     if (!session || !imageRef.current) return;
