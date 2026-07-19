@@ -124,8 +124,8 @@ export function EmotionRecognition() {
 const performInference = async (source: CanvasImageSource): Promise<string> => {
   if (!session) throw new Error("模型未加载");
 
-  const targetSize = Number(inputSize); // 你的模型固定320
-  const channelNum = Number(channels); // 固定3
+  const targetSize = Number(inputSize);
+  const channelNum = Number(channels);
 
   const canvas = document.createElement('canvas');
   canvas.width = targetSize;
@@ -157,7 +157,7 @@ const performInference = async (source: CanvasImageSource): Promise<string> => {
     ctx.drawImage(source, 0, 0, targetSize, targetSize);
   }
 
-  // 2. 构建 NCHW 格式输入张量（强制适配Ultralytics：仅除以255，禁用imagenet归一化）
+  // 构建 NCHW 格式输入张量，仅除以255匹配Ultralytics训练预处理
   const imgData = ctx.getImageData(0, 0, targetSize, targetSize).data;
   const float32Data = new Float32Array(channelNum * targetSize * targetSize);
 
@@ -167,13 +167,12 @@ const performInference = async (source: CanvasImageSource): Promise<string> => {
     const g = imgData[offset + 1] / 255.0;
     const b = imgData[offset + 2] / 255.0;
 
-    // 你的模型训练预处理只用除以255，强制走默认分支，规避imagenet归一化造成精度暴跌
     float32Data[i * 3]     = r;
     float32Data[i * 3 + 1] = g;
     float32Data[i * 3 + 2] = b;
   }
 
-  // 3. 运行推理
+  // 运行推理
   const inputName = session.inputNames[0];
   const tensor = new ort.Tensor('float32', float32Data, [1, channelNum, targetSize, targetSize]);
   const results = await session.run({ [inputName]: tensor });
@@ -184,21 +183,19 @@ const performInference = async (source: CanvasImageSource): Promise<string> => {
   const dims = outputTensor.dims; // [1, 11, 2100]
   
   const labelsArray = labels.split(',').map(label => label.trim());
-  const numClasses = labelsArray.length; // 7
-  const numPredictions = dims[2]; // 修复：预测框总数=2100，原代码此处严重错误
+  const numClasses = labelsArray.length;
+  const numPredictions = dims[2];
   const confThreshold = 0.25;
   
   const detections: any[] = [];
 
-  // 4. 标准 YOLOv8 后处理 + Sigmoid 激活（适配[1, 4+nc, N]输出布局）
+  // 修正索引：单条预测占用11个数值，排布 i*11 + 通道下标
   for (let i = 0; i < numPredictions; i++) {
     let maxClassScore = -Infinity;
     let classId = -1;
 
-    // 遍历7个情绪类别计算sigmoid置信度
     for (let cIdx = 0; cIdx < numClasses; cIdx++) {
-      // 第4+cIdx个通道的logit，对应第i个预测点
-      const rawLogit = outputData[(4 + cIdx) * numPredictions + i];
+      const rawLogit = outputData[i * 11 + (4 + cIdx)];
       const score = 1 / (1 + Math.exp(-rawLogit));
 
       if (score > maxClassScore) {
@@ -208,13 +205,12 @@ const performInference = async (source: CanvasImageSource): Promise<string> => {
     }
 
     if (maxClassScore > confThreshold) {
-      // 提取归一化到320画布的cx cy w h
-      const cx = outputData[0 * numPredictions + i];
-      const cy = outputData[1 * numPredictions + i];
-      const w  = outputData[2 * numPredictions + i];
-      const h  = outputData[3 * numPredictions + i];
+      const cx = outputData[i * 11 + 0];
+      const cy = outputData[i * 11 + 1];
+      const w  = outputData[i * 11 + 2];
+      const h  = outputData[i * 11 + 3];
 
-      // 坐标还原到原图坐标系（letterbox反向映射）
+      // 坐标还原原图
       const xCenterNoPad = cx - padX;
       const yCenterNoPad = cy - padY;
       const originalCx = xCenterNoPad / ratio;
@@ -236,36 +232,17 @@ const performInference = async (source: CanvasImageSource): Promise<string> => {
     }
   }
 
-  // 5. NMS简化：按置信度降序，取最高置信度单框输出；如需完整NMS可再加算法
+  // 按置信度降序取最优结果
   detections.sort((a, b) => b.score - a.score);
   
   if (detections.length > 0) {
-    const best = detections[0]; // 修复原代码bug：原直接传数组，现在取第一条最高分结果
+    const best = detections[0];
     console.log(`[Debug] Best Result: ${best.label}, Score: ${(best.score * 100).toFixed(1)}%`);
     return `${best.label} (${(best.score * 100).toFixed(1)}%)`;
   } else {
     return "未识别出情绪";
   }
 };
-  
-  const runImagePrediction = async () => {
-    if (!session || !imageRef.current) return;
-
-    setIsPredicting(true);
-    setErrorMessage('');
-    setPrediction(null);
-
-    try {
-      const result = await performInference(imageRef.current);
-      setPrediction(result);
-    } catch (err: any) {
-      console.error(err);
-      setErrorMessage('预测失败: ' + (err.message || '未知错误'));
-      setModelStatus('error');
-    } finally {
-      setIsPredicting(false);
-    }
-  };
 
   const startCamera = async () => {
     setErrorMessage('');
